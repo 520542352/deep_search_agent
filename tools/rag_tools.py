@@ -16,10 +16,15 @@ def _load_ragflow_env() ->Tuple[Optional[str], Optional[str]]:  # Optional 表�
    return api_key, base_url
 
 # get_assistant_list 获取聊天助手和知识库信息
-#@tool
+@tool
 def get_assistant_list(
         dummy_arg: Annotated[str, "不需要输入参数，直接调用即可"] ="",
 ) ->str:
+    """
+    【工具功能】获取 RAGFlow 中所有聊天助手信息
+    适用场景：Agent 需要确认当前有哪些可用助手，及每个助手绑定的知识库范围时调用
+    返回：结构化字符串（助手名称+功能介绍+关联知识库）
+    """
     monitor.report_tool("RAGFlow助手查询列表")
     api_key, base_url = _load_ragflow_env()
     # 配置校验
@@ -49,11 +54,16 @@ def get_assistant_list(
 
 
 # create_ask_delete 创建提问和删除会话获取rag查询结果
-#@tool
+@tool
 def create_ask_delete(
         assistant_name: Annotated[str,"必填:目标助手的名称"],
         question: Annotated[str, "必填：要向助手提问的问题"],
 ) ->str:
+    """
+    【工具功能】向指定 RAGFlow 助手发起单次提问（临时会话，用完即删）
+    适用场景：Agent 需单次查询某个助手，无需保留会话记录时调用
+    特点：创建临时会话→流式接收答案→自动删除会话，无数据残留
+    """
     # 调用监控，记录问题
     monitor.report_tool(
         "RAGFlow助手提问工具",
@@ -67,6 +77,8 @@ def create_ask_delete(
         assistants = rag.list_chats(name=assistant_name)
         if not assistants:
             return  f"错误：未找到名为「{assistant_name}」的聊天助手"
+        # assistants = [{'avatar': '', 'create_date': '', 'create_time': , 'dataset_ids': , 'datasets': [{'avatar'...之类的结构
+        # 因此创建一个助手的话取assistants[0]就能拿到该助手的全部信息
         assistant = assistants[0]
 
         session = None
@@ -98,5 +110,5 @@ def create_ask_delete(
 
 
 if __name__ == "__main__":
-    print(create_ask_delete("空调维修助手","空调漏水怎么办"))
+    print(create_ask_delete("空调安装助手","简单说一下窗式的空调安装步骤有哪些"))
     print(get_assistant_list())

@@ -219,3 +219,10 @@ __marimo__/
 
 # pycharm
 .idea/
+
+# test
+knowledge_demo.py
+upload_demo.py
+/output/
+/upload/
+/tools/test_session_123/

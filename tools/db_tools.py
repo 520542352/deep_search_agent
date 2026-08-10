@@ -35,9 +35,19 @@ def get_db_config():
         raise ValueError(msg)
     return config
 
-# @tool
+@tool
 def list_sql_tables() -> Annotated[str, "数据库中可用的表明列表，以逗号分隔"]:
-    #def list_sql_tables() -> Annotated[str, "数据库中可用的表明列表，以逗号分隔"]:
+    """
+    列出配置的 MySQL 数据库中所有可用的表。
+    核心用途：
+        AI Agent 需要查看数据库中有哪些表时调用，为后续执行 SQL 查询提供基础信息。
+    返回值：
+        str: 成功时返回 "可用数据表：表1, 表2, ..."；
+             配置缺失时返回错误提示；
+             执行异常时返回具体错误信息。
+    异常处理：
+        捕获数据库连接/执行 SQL 时的所有 Error 异常，返回可读的错误信息，避免 Agent 崩溃。
+    """
     monitor.report_tool("数据库表获取工具")
     # 获取数据库配置
     config = get_db_config()
@@ -58,10 +68,15 @@ def list_sql_tables() -> Annotated[str, "数据库中可用的表明列表，以
         return f"列出数据表失败: {str(e)}"
 
 
-# @tool
+@tool
 def get_table_data(
         table_name: Annotated[str, "要读的数据表表名"]
 ) -> Annotated[str, "表前100行数据"]:
+    """
+        读取指定 MySQL 数据表的前 100 行数据，返回 CSV 格式结果。
+    """
+
+    # 埋点监控：记录工具调用行为及目标表名
     monitor.report_tool("数据库内容浏览工具", {"正在读的表":table_name})
 
     config = get_db_config()
@@ -98,10 +113,11 @@ def get_table_data(
         logger.error(f"Failed to read table {table_name}: {str(e)}")
         return f"读取数据库{table_name}失败: {str(e)}"
 
-# @tool
+@tool
 def execute_sql_query(
         query: Annotated[str,"要执行的SQL查询语句"]
 ) -> Annotated[str, "查询成功"]:
+    """在 MySQL 数据库上执行自定义 SQL 查询。用于复杂查询、联接或特定数据检索。"""
     monitor.report_tool("数据库查询工具")
     config = get_db_config()
     try:

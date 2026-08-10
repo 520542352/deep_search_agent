@@ -1,13 +1,9 @@
 
 from pathlib import Path
 from loguru import logger
-try:
-    import markdown
-    import win32com.client
-    import pythoncom
-except ImportError:
-    pass
-
+import markdown
+import win32com.client
+import pythoncom
 
 def convert_md_to_pdf_via_word(md_abs_path: Path, pdf_abs_path: Path) -> str |None:
 

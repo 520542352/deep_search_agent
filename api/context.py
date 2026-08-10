@@ -23,7 +23,7 @@ def reset_session_context(session_token, thread_token=None):
     if thread_token:
         _thread_id_ctx.reset(thread_token)
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
     import asyncio
     import random
     # 测试用例
