@@ -48,9 +48,9 @@ async def run_deep_agent(task_query: str, thread_id: str = None):
     # 1.[准备环境] 创建目录、处理上传文件
     session_dir_str, relative_session_dir, upload_info = _prepare_session_environment(thread_id)
 
-    # 2. [上下文吧绑定] 初始化ContextVars（用于隔离并发请求）
-    # thread_token = set_thread_context(thread_id)
-    # session_token = set_session_context(session_dir_str)
+    # 2. [上下文绑定] 初始化ContextVars（用于隔离并发请求）
+    thread_token = set_thread_context(thread_id)
+    session_token = set_session_context(session_dir_str)
     # 监控埋点
     monitor.report_session_dir(session_dir_str)
 
@@ -86,10 +86,10 @@ async def run_deep_agent(task_query: str, thread_id: str = None):
         monitor._emit("error:", f"Exception failed: {str(e)}")
         return f"Error: {e}"
 
-    # finally:
-    #     # 7. [资源处理] 必须重置ContextVars，防止线程池复用导致上下文污染
-    #     if "session_dir" in locals():
-    #         reset_session_context(session_token, thread_token)
+    finally:
+        # 7. [资源处理] 必须重置ContextVars，防止线程池复用导致上下文污染
+        if "session_token" in locals():
+            reset_session_context(session_token, thread_token)
 
     # finally:
     #     if 'session_token' in locals():
@@ -119,7 +119,7 @@ def _prepare_session_environment(thread_id: str):
     relative_session_dir = str(session_dir.relative_to(project_root_path)).replace("\\", "/")
 
     #4. 检查并且处理上传文件
-    upload_dir = project_root_path /"updated"/f"session_{thread_id}"
+    upload_dir = project_root_path /"upload"/f"session_{thread_id}"
     upload_info = ""
 
     if upload_dir.exists():

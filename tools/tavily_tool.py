@@ -6,10 +6,10 @@ from langchain_core.tools import tool
 from tavily import TavilyClient
 
 from api.monitor import monitor
-
+from loguru import logger
 load_dotenv()
 if TavilyClient:
-    tavily_client = TavilyClient(api_key=os.getenv("TVILY_API_KEY"))
+    tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 else:
     tavily_client = None
 
@@ -40,7 +40,9 @@ def internet_search(
          捕获搜索过程中的所有异常并重新抛出，确保 Agent 能感知到搜索失败并处理
      """
     if not tavily_client:
+        logger.error("未创建正确的客户端")
         return "Error: 'tavily_client' is not installed.'"
+
     # 调用工具的时候，monitor会向前端推进进度
     # 参数1：调用工具的名称   参数2：调用工具的参数
     monitor.report_tool(tool_name="网络搜索工具", args={"query": query,"topic": topic,

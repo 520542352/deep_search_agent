@@ -43,7 +43,8 @@ app.add_middleware(
 
 class TaskRequest(BaseModel):
     query: str
-    thread_id: str = None
+    thread_id: str | None = None
+
 
 # 开启任务接口实现
 @app.post("/api/task")
@@ -67,13 +68,14 @@ async def run_task(request: TaskRequest):
     # 1. ID 初始化
     thread_id = request.thread_id or str(uuid.uuid4())
     # 2. 后台异步执行 Agent
-    # asyncio.create_task(run_deep_agent(request, thread_id))
-    result = await run_deep_agent(request.query, thread_id)
+    asyncio.create_task(run_deep_agent(request.query, thread_id))
+    # result = await run_deep_agent(request.query, thread_id)
     # bg.add_task(run_deep_agent_safe, request.query, thread_id) 后续看一下
     return {"status":"started", "thread_id":thread_id}
 
+
 # 上传文件接口
-@app.post("/api/upload ")
+@app.post("/api/upload")
 async def upload_files(files: List[UploadFile] = File(...),thread_id: str = Form(...)):
     """
     文件上传接口
@@ -105,6 +107,7 @@ async def upload_files(files: List[UploadFile] = File(...),thread_id: str = Form
     # 3.返回成功保存的文件列表
     return {"status": "uploaded", "files": saved_files}
 
+
 # 下载文件接口
 @app.get("/api/download")
 async def download_file(path:str):
@@ -134,6 +137,7 @@ async def download_file(path:str):
 
     # 3.返回文件流
     return FileResponse(abs_path, filename=abs_path.name)
+
 
 # 查询所有文件列表接口
 @app.get("/api/files")
@@ -188,6 +192,7 @@ async def list_files(path: str):
     files.sort(key=lambda x: x.get("mtime",0), reverse=True)
     return {"files": files}
 
+
 # WebSocket实时通讯
 @app.websocket("/ws/{thread_id}")
 async def websocket_endpoint(websocket: WebSocket, thread_id: str):
@@ -200,7 +205,7 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     3.维持心跳，防止连接超时
 
     执行步骤：
-    1.握手：接受Websocket连接请求
+    1.握手：接受 Websocket连接请求
     2.注册：将连接实例绑定到'monitor.manager'，关联到'thread_id'
     3.循环：进入消息监听循环，处理前端发送的心跳或者指令
     4.异常：捕获：捕获异常断开连接，清理资源
