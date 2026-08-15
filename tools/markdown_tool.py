@@ -34,14 +34,15 @@ def generate_markdown(
         full_input_path = str(Path(path)/filename)
     else:
         full_input_path = filename
-    full_path_str = resolve_path(full_input_path, session_dir)
-    file_path = Path(full_path_str)
-
-    # 获取父目录
-    parent_dir = file_path.parent
-    logger.info(f"[MarkdownTool] Debug: parent_dir={parent_dir}, filename={filename}, full_path={file_path}")
-
     try:
+
+        full_path_str = resolve_path(full_input_path, session_dir)
+        file_path = Path(full_path_str)
+
+        # 获取父目录
+        parent_dir = file_path.parent
+        logger.info(f"[MarkdownTool] Debug: parent_dir={parent_dir}, filename={filename}, full_path={file_path}")
+
         if not parent_dir.exists():
             parent_dir.mkdir(parents=True,exist_ok=True)
             logger.info(f"[MarkdownTool] Created directory: {parent_dir}")

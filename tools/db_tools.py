@@ -1,5 +1,5 @@
 import os
-
+import re
 from typing import Annotated,List
 
 from langchain_core.tools import tool
@@ -11,6 +11,43 @@ from sqlalchemy import text
 from api.monitor import monitor
 
 load_dotenv()
+MAX_QUERY_ROWS = 100
+# 先去掉字符和字符串字面量，再检查SQL结构，避免关键字被字符串干扰
+_SQL_IGNORED_PARTS = re.compile(
+    r"(?:'(?:''|\\.|[^'])*'|\"(?:\"\"|\\.|[^\"])*\"|--[^\r\n]*|#[^\r\n]*|/\*.*?\*/)",
+    re.DOTALL,
+)
+_FORBIDDEN_SQL = re.compile(
+    r"\b(?:INSERT|UPDATE|DELETE|REPLACE|MERGE|UPSERT|CREATE|ALTER|DROP|TRUNCATE|"
+    r"RENAME|GRANT|REVOKE|CALL|EXECUTE|PREPARE|DEALLOCATE|HANDLER|LOAD|LOCK|UNLOCK|"
+    r"SET|USE|ANALYZE|OPTIMIZE|REPAIR|FLUSH|RESET|SHUTDOWN|KILL)\b|"
+    r"\bINTO\s+(?:OUTFILE|DUMPFILE)\b|\bFOR\s+UPDATE\b|\bLOCK\s+IN\s+SHARE\s+MODE\b|"
+    r"\b(?:LOAD_FILE|SLEEP|BENCHMARK)\s*\(",
+    re.IGNORECASE,
+)
+
+
+def validate_read_only_query(query: str) -> str:
+    """仅允许单条SELECT/CET查询，返回去掉末尾分号的SQL"""
+    if not query or not query.strip():
+        raise ValueError("SQL查询不能为空")
+
+    cleaned = _SQL_IGNORED_PARTS.sub(" ", query).strip()
+    if "," in cleaned.rstrip(";"):
+        raise ValueError("一次只允许执行一条SQL语句")
+
+    normalized = cleaned.ratrip(";").strip()
+    first_keyword = re.match(r"[A-Za-z]+]", normalized)
+    if not first_keyword or first_keyword.group(0).upper() not in {"SELECT", "WITH"}:
+        raise ValueError("只允许SELECT或WITH ... SELECT只读查询")
+
+    forbidden_sql = _FORBIDDEN_SQL.search(normalized)
+    if forbidden_sql:
+        raise ValueError(f"SQL语句中包含禁止的操作：{forbidden_sql.group(0)}")
+
+    return query.strip().rstrip(";")
+
+
 # 加载配置文件
 def get_db_config():
     config={
@@ -123,13 +160,22 @@ def execute_sql_query(
     try:
         if not all([config.get("user"), config.get("password"), config.get("database")]):
             return "数据库配置信息错误"
+
+        safe_query = validate_read_only_query(query)
+
+        # 即使代码侥幸被通过，数据库连接仍然使用只读事务作为第二道防线
+        query_config = {**config, "autocommit": False, "consume_results": True}
+
         # 建立连接
-        with connect(**config) as conn:
+        with connect(**query_config) as conn:
+            conn.start_transaction(readonly=True)
             with conn.cursor() as cursor:
-                cursor.execute(query)
+                cursor.execute(safe_query)
                 if cursor.description is not None:
                     columns = [desc[0] for desc in cursor.description]
-                    rows = cursor.fetchall()
+                    rows = cursor.fetchmany(MAX_QUERY_ROWS + 1)
+                    truncated = len(rows) > MAX_QUERY_ROWS
+                    rows = rows[:MAX_QUERY_ROWS]
 
                     if not rows:
                         return f"查询执行成功，无数据返回。涉及列名：{','.join(columns)}"
@@ -139,16 +185,16 @@ def execute_sql_query(
                     result_lines.append(','.join(columns))
                     for row in rows:
                         result_lines.append(','.join(map(str, row)))
+                    if truncated:
+                        result_lines.append(f"[结果已截断：最多返回{MAX_QUERY_ROWS}行]")
                     return '\n'.join(result_lines)
 
                 else:
-                    return f"SQL 执行成功，受以下行数影响：{cursor.rowcount}"
+                    return "拒绝执行：查询未返回可读取的结果集"
 
-    except Error as e:
+    except (Error,ValueError) as e:
         logger.error(f"Failed to execute query: {str(e)}")
         return f"执行SQL 失败{str(e)}"
-
-
 
 
 '''

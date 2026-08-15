@@ -1,76 +1,64 @@
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
+from loguru import logger
+
+_SAVE_THREAD_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+def validate_thread_id(thread_id: str) -> str:
+    """会话 ID会参与目录名拼接，因此只允许安全的ASCII字符"""
+    if not thread_id or not _SAVE_THREAD_ID.fullmatch(thread_id):
+        logger.warning(f"thread_id {thread_id} is not valid")
+        raise ValueError("thread_id 只能包含数字、字符串、下划线和连字符，长度1-128")
+    return thread_id
+
+
+def _ensure_within_session(candidate:Path, session_path:Path) ->Path:
+    """解析路径并强制其位于当前会话目录中"""
+    resolve_candidate = candidate.resolve()
+    try:
+        resolve_candidate.relative_to(session_path)
+    except ValueError as exc:
+        raise ValueError(f"拒绝访问当前会话目录之外的路径：{resolve_candidate}") from exc
+    return resolve_candidate
+
+
 def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
+    if not filename or not filename.strip():
+        raise ValueError("文件路径不能为空")
 
-    path = Path(filename)
-    path_str = filename.replace("\\", "/")  # 统一处理字符串匹配
+    path_str = filename.strip().replace("\\", "/")  # 统一处理字符串匹配
 
-    # 1. 虚拟路径清洗
+    # 虚拟路径清洗
     virtual_prefixes = ["/workspace", "/mnt/data", "/home/user"]
     for prefix in virtual_prefixes:
         if path_str.startswith(prefix):
             # 去掉前缀
             cleaned = path_str[len(prefix):].lstrip("/")
-            path = Path(cleaned)
-            path_str = str(path).replace("\\", "/")
+            path_str = cleaned
             break
 
-    # 2. 特殊处理：updated/ (用户上传文件)
-    # 只要路径中包含 updated/，就提取其后半部分，并相对于 CWD 解析
-    if "updated/" in path_str:
-        idx = path_str.find("updated/")
-        relative_part = path_str[idx:]
-        return str(Path(relative_part).resolve())
-
     if not session_dir:
-        return str(path.resolve())
+        raise ValueError("未绑定回话目录，拒绝读写文件")
+
 
     session_path = Path(session_dir).resolve()
     session_name = session_path.name
+    path = Path(path_str)
 
-    # 3. 结合 Session Context
-
-    # 检测 Unix 风格绝对路径 (以 / 开头)
-    is_unix_abs = path_str.startswith("/")
-
-    # 如果是绝对路径 (Windows带盘符 或 Unix/开头)
-    if path.is_absolute() or (os.name == 'nt' and is_unix_abs):
-        # Windows 特殊情况：以 / 开头但无盘符，视为相对路径
-        if os.name == 'nt' and is_unix_abs and not path.drive:
-            full_path = session_path / path_str.lstrip("/")
-        else:
-            full_path = path.resolve()
-
-        # 检查是否在 session 目录内
-        try:
-            # 判断 full_path 是否是 session_path 的子路径
-            if session_path in full_path.parents or full_path == session_path:
-                # 检查嵌套 (例如 .../session_abc/session_abc/file.txt)
-                # 检查路径部分中是否有连续重复的 session_name
-                parts = full_path.parts
-                for i in range(len(parts) - 1):
-                    if parts[i] == session_name and parts[i + 1] == session_name:
-                        # 发现嵌套，修正为 session_dir / filename
-                        return str(session_path / full_path.name)
-                return str(full_path)
-        except Exception:
-            pass
-
-        # 绝对路径但不在 session_dir 下 -> 保持原样
-        return str(full_path)
-
+    # 模型有时会重复传入 output/session_xxx/file.md。从 session 目录名
+    # 之后截取，避免生成 session_xxx/output/session_xxx/file.md。
+    if not path.is_absolute() and session_name in path.parts:
+        session_index = path.parts.index(session_name)
+        relative_parts = path.parts[session_index +1:]
+        candidate = session_path.joinpath(*relative_parts)
+    elif path.is_absolute():
+        candidate = path
+    elif os.name == "nt" and path_str.startswith("/"):
+        candidate = session_path / path_str.lstrip("/")
     else:
-        # 相对路径处理
-        parts = path.parts
+        candidate = session_path / path
 
-        # 检查是否包含 session_name (避免重复) 或 output/ 前缀
-        if session_name in parts:
-            return str(session_path / path.name)
-
-        if parts and parts[0] == "output":
-            return str(session_path / path.name)
-
-        # 默认：拼接到 session_dir
-        return str(session_path / path)
+    return str(_ensure_within_session(candidate, session_path))

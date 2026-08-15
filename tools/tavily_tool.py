@@ -41,7 +41,7 @@ def internet_search(
      """
     if not tavily_client:
         logger.error("未创建正确的客户端")
-        return "Error: 'tavily_client' is not installed.'"
+        return "Error: 未配置 TAVILY_API_KEY，无法执行网络搜索。'"
 
     # 调用工具的时候，monitor会向前端推进进度
     # 参数1：调用工具的名称   参数2：调用工具的参数

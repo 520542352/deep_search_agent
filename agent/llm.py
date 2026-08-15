@@ -8,5 +8,5 @@ model = init_chat_model(
     # model_provider="SiliconFlow"
     model_provider="openai",
     api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_API_URL")
+    base_url=os.getenv("OPENAI_BASE_URL")
 )

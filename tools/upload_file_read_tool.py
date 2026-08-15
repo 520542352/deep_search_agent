@@ -37,8 +37,10 @@ def read_file(
     monitor.report_tool("文件路径内容读取工具",{"filename":filename,"instruction":instruction})
     # Path 重构文件路径
     session_dir = get_session_context()
-    file_path = Path(resolve_path(filename, session_dir)) # 转换为path对象
-
+    try:
+        file_path = Path(resolve_path(filename, session_dir)) # 转换为path对象
+    except ValueError as e:
+        return f"错误:{str(e)}"
     # 检查文件是否存在
     if not file_path.exists():
         return f"错误：文件'{filename}' 不存在(解析路径：{file_path})."

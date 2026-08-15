@@ -25,7 +25,9 @@ from api.context import set_session_context, reset_session_context, set_thread_c
 
 from langchain_core.messages import AIMessage
 
-#from api.logger import AgentLogger, AgentLogCallbackHandler
+from utils.path_utils import validate_thread_id
+
+# from api.logger import AgentLogger, AgentLogCallbackHandler
 
 # 1.搭建多智能体结构
 subagents_list = [
@@ -107,6 +109,10 @@ def _prepare_session_environment(thread_id: str):
     3. 生成供 Agent 和前端使用的路径上下文
     :param thread_id: 会话ID
     """
+    # 补充：校验thread_id是否合法
+
+    thread_id = validate_thread_id(thread_id)
+
 
     #1. 创建会话输出的绝对路径对应的文件夹
     session_dir = project_root_path /"output"/f"session_{thread_id}"

@@ -5,13 +5,15 @@ from csv import excel
 
 import uvicorn
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 import shutil
 from loguru import logger
+
+from utils.path_utils import validate_thread_id
 
 # 配置项目路径到环境变量
 project_root = Path(__file__).resolve().parents[1]
@@ -67,10 +69,15 @@ async def run_task(request: TaskRequest):
     """
     # 1. ID 初始化
     thread_id = request.thread_id or str(uuid.uuid4())
+    try:
+        thread_id = validate_thread_id(thread_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     # 2. 后台异步执行 Agent
     asyncio.create_task(run_deep_agent(request.query, thread_id))
     # result = await run_deep_agent(request.query, thread_id)
-    # bg.add_task(run_deep_agent_safe, request.query, thread_id) 后续看一下
+
     return {"status":"started", "thread_id":thread_id}
 
 
@@ -90,6 +97,10 @@ async def upload_files(files: List[UploadFile] = File(...),thread_id: str = Form
     thread_id(str): 关联的会话ID
     """
 
+    try:
+        thread_id = validate_thread_id(thread_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     # 1. 确保上传目录存在
     target_dir = upload_dir/f"session_{thread_id}"
     target_dir.mkdir(exist_ok=True, parents=True)
@@ -97,12 +108,16 @@ async def upload_files(files: List[UploadFile] = File(...),thread_id: str = Form
     # 2. 保存并写入文件
     saved_files = []
     for file in files:
-        file_path = target_dir / file.filename
+        # UploadFile.filename 来自客户端，只保留文件名，防止../或者绝对路径越界
+        safe_filename = Path(file.filename or "").name
+        if not safe_filename or safe_filename in {".", ".."}:
+            return {"error":"无效的文件命"}
+        file_path = target_dir / safe_filename
         # 使用二进制模式写入
         # shutil.copyfileobj 高效复制文件流，避免一次性加载大文件到内存
         with file_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        saved_files.append(file.filename)
+        saved_files.append(safe_filename)
 
     # 3.返回成功保存的文件列表
     return {"status": "uploaded", "files": saved_files}
