@@ -1,9 +1,6 @@
 import sys
 import uuid
 import asyncio
-from csv import excel
-
-import uvicorn
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
@@ -70,7 +67,7 @@ async def run_task(request: TaskRequest):
     # 1. ID 初始化
     thread_id = request.thread_id or str(uuid.uuid4())
     try:
-        thread_id = validate_thread_id(thread_id)
+        validate_thread_id(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -98,7 +95,7 @@ async def upload_files(files: List[UploadFile] = File(...),thread_id: str = Form
     """
 
     try:
-        thread_id = validate_thread_id(thread_id)
+        validate_thread_id(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     # 1. 确保上传目录存在
@@ -253,4 +250,4 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
 
 # if __name__ == "__main__":
 #     uvicorn.run("app.server:app", host="0.0.0.0", port=8000,reload=True)
-# 项目根目录下使用 uv run uvicorn api.server:app --reload --host 0.0.0.0 --port启动
+# 项目根目录下使用 uv run uvicorn api.server:app --reload --host 0.0.0.0 --port 8000 启动

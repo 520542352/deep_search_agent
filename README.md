@@ -1,8 +1,8 @@
 <div align="center">
 
-# Enterprise Deep Research Agent
+# Deep Research Agent
 
-### 面向企业多源知识的 Deep Research 多智能体系统
+### 面向多源知识的 Deep Research 多智能体系统
 
 一个基于 **DeepAgents / LangGraph** 的深度研究应用：由主智能体拆解和调度任务，联合互联网搜索、MySQL 业务数据与 RAGFlow 内部知识库完成多源研究，并通过 WebSocket 实时呈现执行过程，最终生成 Markdown / PDF 研究文档。
 
@@ -34,57 +34,29 @@
 
 ### 1. 完整研究对话
 
-<!-- 建议展示：多源研究问题、最终结论和任务完成状态。图片放在 docs/images/research-result.png。 -->
-<!-- ![完整研究对话](docs/images/research-result.png) -->
+![1](docs/images/RAG查询.png)
+
+![2](docs/images/SQL查询.png)
+
+![4](docs/images/网络搜索查询.png)
 
 ### 2. 多智能体执行过程
 
-<!-- 建议展示：主 Agent → 子 Agent → 具体工具的实时日志，优先使用 GIF。文件放在 docs/images/agent-workflow.gif。 -->
-<!-- ![多智能体执行过程](docs/images/agent-workflow.gif) -->
+![1](docs/images/RAG后台.png)
+
+![2](docs/images/sql查询后台.png)
+
+![3](docs/images/网络搜索后台.png)
 
 ### 3. 文件上传与分析
 
-<!-- 建议展示：上传 PDF / Excel 后，Agent 结合文件和外部数据完成分析。图片放在 docs/images/file-analysis.png。 -->
-<!-- ![文件分析](docs/images/file-analysis.png) -->
+![3](docs/images/上传文件解析.png)
 
-### 4. 研究报告交付
 
-<!-- 建议展示：Markdown / PDF 文件列表和 PDF 报告首页或目录。图片放在 docs/images/report-delivery.png。 -->
-<!-- ![研究报告交付](docs/images/report-delivery.png) -->
 
 ## 🏗️ 系统架构
 
-```mermaid
-flowchart TD
-    U["前端 / 用户"] -->|"POST /api/task<br/>query + thread_id"| API["FastAPI 服务"]
-    API -->|"asyncio.create_task"| RUN["run_deep_agent"]
-
-    RUN --> ENV["创建会话工作目录<br/>output/session_thread_id"]
-    RUN --> CTX["绑定 ContextVar<br/>thread_id + session_dir"]
-    RUN --> DA["DeepAgents 主智能体"]
-
-    DA -->|"task 委派"| WEB["网络搜索助手"]
-    DA -->|"task 委派"| DB["数据库查询助手"]
-    DA -->|"task 委派"| RAG["RAGFlow 助手"]
-
-    WEB --> TAVILY["Tavily API"]
-    DB --> MYSQL["MySQL"]
-    RAG --> RAGFLOW["RAGFlow 服务"]
-
-    DA --> FILES["主智能体文件工具"]
-    FILES --> READ["读取上传文件"]
-    FILES --> MD["生成 Markdown"]
-    FILES --> PDF["Word COM 转 PDF"]
-
-    CTX --> MON["ToolMonitor"]
-    WEB --> MON
-    DB --> MON
-    RAG --> MON
-    FILES --> MON
-
-    MON -->|"按 thread_id 推送"| WS["WebSocket /ws/thread_id"]
-    WS --> U
-```
+![1](docs/images/Flowchart.png)
 
 ## 🔄 工作流程
 
@@ -255,11 +227,8 @@ curl -X POST http://127.0.0.1:8000/api/task \
 ## 🗺️ Roadmap
 
 - [ ] 引入 LangGraph Checkpointer，支持服务重启后的会话恢复
-- [ ] 为搜索结果增加来源去重、可信度评分与引用溯源
+- [ ] 为搜索结果增加可信度评分与引用溯源
 - [ ] 增加 Agent 调用链路、Token 成本和任务耗时指标
-- [ ] 建立工具单测、Agent 轨迹回归测试和 CI 流水线
-- [ ] 将 Word COM PDF 转换替换或补充为跨平台方案
-- [ ] 将前后端服务地址与 CORS 策略改为环境化配置
 
 ## ⚠️ 当前限制
 

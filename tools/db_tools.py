@@ -6,7 +6,6 @@ from langchain_core.tools import tool
 from loguru import logger
 from dotenv import load_dotenv
 from mysql.connector import connect, Error
-from sqlalchemy import text
 
 from api.monitor import monitor
 
@@ -28,24 +27,33 @@ _FORBIDDEN_SQL = re.compile(
 
 
 def validate_read_only_query(query: str) -> str:
-    """仅允许单条SELECT/CET查询，返回去掉末尾分号的SQL"""
+    """仅允许单条 SELECT/CTE 查询，返回去掉末尾分号的 SQL。"""
     if not query or not query.strip():
         raise ValueError("SQL查询不能为空")
 
+    # 去掉字符串、注释，避免其中的分号和关键字干扰校验
     cleaned = _SQL_IGNORED_PARTS.sub(" ", query).strip()
-    if "," in cleaned.rstrip(";"):
+
+    # 允许末尾有一个分号，但不允许中间出现分号（多条 SQL）
+    normalized = cleaned.rstrip(";").strip()
+    if ";" in normalized:
         raise ValueError("一次只允许执行一条SQL语句")
 
-    normalized = cleaned.ratrip(";").strip()
-    first_keyword = re.match(r"[A-Za-z]+]", normalized)
-    if not first_keyword or first_keyword.group(0).upper() not in {"SELECT", "WITH"}:
+    # 获取第一个 SQL 关键字
+    first_keyword = re.match(r"[A-Za-z]+", normalized)
+    if (
+        not first_keyword
+        or first_keyword.group(0).upper() not in {"SELECT", "WITH"}
+    ):
         raise ValueError("只允许SELECT或WITH ... SELECT只读查询")
 
     forbidden_sql = _FORBIDDEN_SQL.search(normalized)
     if forbidden_sql:
-        raise ValueError(f"SQL语句中包含禁止的操作：{forbidden_sql.group(0)}")
+        raise ValueError(
+            f"SQL语句中包含禁止的操作：{forbidden_sql.group(0)}"
+        )
 
-    return query.strip().rstrip(";")
+    return query.strip().rstrip(";").strip()
 
 
 # 加载配置文件

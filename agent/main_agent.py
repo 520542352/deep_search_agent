@@ -16,8 +16,7 @@ from agent.llm import model
 from agent.prompts import main_agent_config
 
 from api.monitor import monitor
-import asyncio
-import uuid
+
 import shutil
 from pathlib import Path
 
@@ -27,7 +26,6 @@ from langchain_core.messages import AIMessage
 
 from utils.path_utils import validate_thread_id
 
-# from api.logger import AgentLogger, AgentLogCallbackHandler
 
 # 1.搭建多智能体结构
 subagents_list = [
@@ -85,7 +83,7 @@ async def run_deep_agent(task_query: str, thread_id: str = None):
     except Exception as e:
         # 7. 异常处理
         logger.error(f"Error:{e}")
-        monitor._emit("error:", f"Exception failed: {str(e)}")
+        monitor._emit("error", f"Exception failed: {str(e)}")
         return f"Error: {e}"
 
     finally:
@@ -93,11 +91,6 @@ async def run_deep_agent(task_query: str, thread_id: str = None):
         if "session_token" in locals():
             reset_session_context(session_token, thread_token)
 
-    # finally:
-    #     if 'session_token' in locals():
-    #         reset_session_context(session_token)
-    #     if 'thread_token' in locals():
-    #         reset_session_context(thread_token)
 
 # 辅助函数：_prepare_session_environment用于初始化会话的运行环境（会话文件夹、相对路径、上传文件信息）
 def _prepare_session_environment(thread_id: str):

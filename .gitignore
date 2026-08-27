@@ -227,3 +227,4 @@ upload_demo.py
 /upload/
 /tools/test_session_123/
 .langgraph.json
+.codexignore.txt
