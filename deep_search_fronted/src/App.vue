@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, computed, watch } from 'vue'
+import { ref, onMounted, nextTick, computed } from 'vue'
 import axios from 'axios'
 import { marked } from 'marked'
 

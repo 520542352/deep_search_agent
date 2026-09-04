@@ -97,7 +97,7 @@ LLM 输出不应被直接信任，因此项目在工具层而不是仅在 Prompt
 | 外部搜索 | Tavily Search API |
 | 内部知识 | RAGFlow SDK |
 | 结构化数据 | MySQL Connector/Python |
-| 文件处理 | pandas、openpyxl、python-docx、pypdf、Markdown、Word COM |
+| 文件处理 | pandas、openpyxl、python-docx、pypdf、Markdown、xhtml2pdf |
 | 前端 | Vue 3、TypeScript、Vite、Axios、Marked |
 | 工程化 | uv、YAML 提示词配置、Loguru日志 |
 
@@ -123,7 +123,7 @@ deep-search-agent/
 │   └── pdf_tool.py                   # PDF 转换工具
 ├── utils/
 │   ├── path_utils.py                 # 路径规范化与越界防护
-│   └── word_convert.py               # Markdown → HTML → Word → PDF
+│   └── pdf_renderer.py               # Markdown → HTML → PDF
 ├── prompt/prompts.yaml             # 主子 Agent 角色与工作流
 ├── output/                        # 会话输出（Git 忽略）
 ├── upload/                        # 临时上传（Git 忽略）
@@ -142,7 +142,6 @@ Web UI 作为独立 Vue 3 工程运行，通过 `http://127.0.0.1:8000` 与本�
 - Node.js 20+ 与 npm（运行 Web UI）
 - MySQL（使用数据库 Agent 时）
 - 可访问的 RAGFlow 服务（使用知识库 Agent 时）
-- Windows + Microsoft Word（使用 PDF 转换时）
 
 ### 2. 安装后端依赖
 
@@ -235,6 +234,24 @@ curl -X POST http://127.0.0.1:8000/api/task \
 - `thread_id` 当前用于会话路由、输出目录和运行时配置，项目尚未配置持久化 Checkpointer。
 - 各外部能力需要可用的模型服务、Tavily、RAGFlow 和 MySQL 配置。
 - 项目当前为学习与工程实践版本，生产部署前还需增加身份认证、请求限流、密钥管理和更完整的沙箱隔离。
+
+## 🧪 自动化测试
+
+项目的基础测试默认离线运行，不会连接真实的 LLM、Tavily、MySQL 或 RAGFlow。安装开发依赖并执行测试：
+
+```bash
+uv sync --dev
+uv run pytest
+```
+
+测试覆盖路径与 SQL 安全校验、异步会话上下文、文件工具、Agent 辅助逻辑，以及 FastAPI 文件和 WebSocket 接口。当前覆盖率最低门槛为 60%；低于该基线时测试命令会失败。
+
+仅运行快速单元测试或 API 测试：
+
+```bash
+uv run pytest -m unit --no-cov
+uv run pytest -m api --no-cov
+```
 
 ## 📄 License
 

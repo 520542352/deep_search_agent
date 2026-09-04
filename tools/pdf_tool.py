@@ -11,7 +11,7 @@ from langchain_core.tools import tool
 from api.monitor import monitor
 from api.context import get_session_context
 from utils.path_utils import resolve_path
-from utils.word_convert import convert_md_to_pdf_via_word
+from utils.pdf_renderer import convert_md_to_pdf_via_html
 
 
 @tool
@@ -20,7 +20,7 @@ def convert_md_to_pdf(
         pdf_filename: Annotated[Optional[str], "输出的PDF文件路径（可选，默认与源文件同名）"] = None
 ) -> str:
     """
-    将Markdown文档转换为PDF（基于Word引擎）
+    将Markdown文档转换为PDF（基于跨平台 HTML 渲染引擎）
     核心优化：路径与资源管理逻辑分离，只保留Tool层的基础调用
     """
     monitor.report_tool("Markdown转PDF工具")
@@ -43,7 +43,7 @@ def convert_md_to_pdf(
             pdf_abs_path = md_abs_path.with_suffix('.pdf')
 
         # 4. 调用核心转换逻辑
-        return convert_md_to_pdf_via_word(md_abs_path, pdf_abs_path)
+        return convert_md_to_pdf_via_html(md_abs_path, pdf_abs_path)
 
     except Exception as e:
         logger.error(f"转换失败: {e}", exc_info=True)
