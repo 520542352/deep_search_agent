@@ -203,21 +203,3 @@ def execute_sql_query(
     except (Error,ValueError) as e:
         logger.error(f"Failed to execute query: {str(e)}")
         return f"执行SQL 失败{str(e)}"
-
-
-'''
-def parser_table(result: str) ->list[str]:
-    if not result.startswith("可用数据表:"):
-        return []
-    tables_part = result.replace("可用数据表:", "").strip()
-    return [t.strip() for t in tables_part.split(",")]
-'''
-
-#if __name__ == "__main__":
-    #print(list_sql_tables())
-    # result_table = list_sql_tables()
-    # table_names = parser_table(result_table)
-    # for table_name in table_names:
-
-    #print(get_table_data("drugs"))
-    #print(execute_sql_query("select * from `drugs` dgs join sales_records srd on dgs.drug_id = srd.drug_id;"))
