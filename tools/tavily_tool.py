@@ -7,11 +7,16 @@ from tavily import TavilyClient
 
 from api.monitor import monitor
 from loguru import logger
+
 load_dotenv()
-if TavilyClient:
-    tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-else:
-    tavily_client = None
+
+
+def _create_tavily_client():
+    """Create the SDK client on demand so importing this module stays offline."""
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        return None
+    return TavilyClient(api_key=api_key)
 
 # 定义网络搜索工具
 @tool
@@ -37,11 +42,17 @@ def internet_search(
              - results: 搜索结果列表，每个元素包含 url、content（摘要）、raw_content（原始内容，可选）等
          str: 初始化失败时返回错误提示字符串
      异常处理：
-         捕获搜索过程中的所有异常并重新抛出，确保 Agent 能感知到搜索失败并处理
-     """
-    if not tavily_client:
-        logger.error("未创建正确的客户端")
-        return "Error: 未配置 TAVILY_API_KEY，无法执行网络搜索。'"
+         捕获客户端初始化或搜索异常并返回可读错误，避免外部服务故障中断 Agent。
+    """
+    try:
+        tavily_client = _create_tavily_client()
+    except Exception as exc:
+        logger.error(f"Tavily 客户端初始化失败: {exc}")
+        return f"Error: Tavily 客户端初始化失败：{exc}"
+
+    if tavily_client is None:
+        logger.error("未配置 TAVILY_API_KEY")
+        return "Error: 未配置 TAVILY_API_KEY，无法执行网络搜索。"
 
     # 调用工具的时候，monitor会向前端推进进度
     # 参数1：调用工具的名称   参数2：调用工具的参数
@@ -51,5 +62,6 @@ def internet_search(
         results = tavily_client.search(query=query,topic=topic,max_results=max_results,
                                        include_raw_content=include_raw_content)
         return results
-    except Exception as e:
-        raise e
+    except Exception as exc:
+        logger.error(f"Tavily 搜索失败: {exc}")
+        return f"Error: Tavily 搜索失败：{exc}"
