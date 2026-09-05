@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Annotated,List
+from typing import Annotated
 
 from langchain_core.tools import tool
 from loguru import logger
@@ -24,6 +24,14 @@ _FORBIDDEN_SQL = re.compile(
     r"\b(?:LOAD_FILE|SLEEP|BENCHMARK)\s*\(",
     re.IGNORECASE,
 )
+_MYSQL_IDENTIFIER = re.compile(r"^[A-Za-z0-9_$]+$")
+
+
+def validate_table_name(table_name: str) -> str:
+    """Validate a single MySQL identifier before placing it in quoted SQL."""
+    if not table_name or not _MYSQL_IDENTIFIER.fullmatch(table_name):
+        raise ValueError("数据表名只能包含英文字母、数字、下划线或美元符号")
+    return table_name
 
 
 def validate_read_only_query(query: str) -> str:
@@ -94,9 +102,9 @@ def list_sql_tables() -> Annotated[str, "数据库中可用的表明列表，以
         捕获数据库连接/执行 SQL 时的所有 Error 异常，返回可读的错误信息，避免 Agent 崩溃。
     """
     monitor.report_tool("数据库表获取工具")
-    # 获取数据库配置
-    config = get_db_config()
     try:
+        # 获取数据库配置
+        config = get_db_config()
         if not all([config.get("user"), config.get("password"), config.get("database")]):
             return "错误：数据库配置缺失"
         with connect(**config) as conn:
@@ -124,15 +132,15 @@ def get_table_data(
     # 埋点监控：记录工具调用行为及目标表名
     monitor.report_tool("数据库内容浏览工具", {"正在读的表":table_name})
 
-    config = get_db_config()
     try:
+       safe_table_name = validate_table_name(table_name)
+       config = get_db_config()
        if not all([config.get("user"), config.get("password"), config.get("database")]):
             return "错误：数据库配置缺失"
 
        # 建立数据库连接并创建游标
        with connect(**config) as conn:
            with conn.cursor() as cursor:
-               safe_table_name = table_name.replace("`","").replace(";","").split()[0]
                sql = f"select * from `{safe_table_name}` limit 100"
                cursor.execute(sql)
                # 获取sql结果
@@ -164,8 +172,8 @@ def execute_sql_query(
 ) -> Annotated[str, "查询成功"]:
     """在 MySQL 数据库上执行自定义 SQL 查询。用于复杂查询、联接或特定数据检索。"""
     monitor.report_tool("数据库查询工具")
-    config = get_db_config()
     try:
+        config = get_db_config()
         if not all([config.get("user"), config.get("password"), config.get("database")]):
             return "数据库配置信息错误"
 

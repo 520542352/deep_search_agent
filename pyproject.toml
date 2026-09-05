@@ -64,5 +64,6 @@ addopts = [
 markers = [
     "unit: fast tests without external services",
     "api: FastAPI and WebSocket boundary tests",
+    "contract: offline adapter contract tests for external services",
 ]
 tmp_path_retention_count = 0

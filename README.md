@@ -244,13 +244,14 @@ uv sync --dev
 uv run pytest
 ```
 
-测试覆盖路径与 SQL 安全校验、异步会话上下文、文件工具、Agent 辅助逻辑，以及 FastAPI 文件和 WebSocket 接口。当前覆盖率最低门槛为 60%；低于该基线时测试命令会失败。
+测试覆盖路径与 SQL 安全校验、异步会话上下文、文件工具、Agent 辅助逻辑、FastAPI 文件和 WebSocket 接口，以及 Tavily、RAGFlow、MySQL 的离线适配器契约。当前覆盖率最低门槛为 60%；低于该基线时测试命令会失败。
 
 仅运行快速单元测试或 API 测试：
 
 ```bash
 uv run pytest -m unit --no-cov
 uv run pytest -m api --no-cov
+uv run pytest -m contract --no-cov
 ```
 
 ## 📄 License

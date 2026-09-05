@@ -4,6 +4,7 @@ from typing import Tuple, Optional, Annotated
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from ragflow_sdk import RAGFlow
+from loguru import logger
 
 from api.monitor import monitor
 
@@ -39,7 +40,6 @@ def get_assistant_list(
             kb_names = []
             if assistant.datasets and isinstance(assistant.datasets, list):
                 for dataset in assistant.datasets:
-                    print(dataset)
                     if isinstance(dataset, dict) and "name" in dataset:
                         kb_names.append(dataset["name"])
 
@@ -71,6 +71,9 @@ def create_ask_delete(
     )
     # 获取参数
     api_key, base_url = _load_ragflow_env()
+    if not api_key or not base_url:
+        return "错误：未成功配置api_key或者base_url"
+
     # 处理提问逻辑
     try:
         rag = RAGFlow(api_key=api_key, base_url=base_url)
@@ -98,17 +101,15 @@ def create_ask_delete(
                 "RAGFlow助手返回的答案",
                 {"助手名称":assistant_name, "问题": question, "答案": full_answer}
             )
-            # 自动删除会话
-            if session and hasattr(session, "id"):
-                assistant.delete_sessions(ids=[session.id])
             return full_answer if full_answer else "未获取到助手的回答"
         except Exception as e:
             return f"提问过程失败{str(e)}"
+        finally:
+            # 临时会话无论成功、流式读取失败还是监控失败都必须清理。
+            if session and getattr(session, "id", None):
+                try:
+                    assistant.delete_sessions(ids=[session.id])
+                except Exception as cleanup_error:
+                    logger.warning(f"RAGFlow 临时会话清理失败: {cleanup_error}")
     except Exception as e:
         return f"RAGFlow 操作失败 {str(e)}"
-
-
-
-if __name__ == "__main__":
-    print(create_ask_delete("空调安装助手","简单说一下窗式的空调安装步骤有哪些"))
-    print(get_assistant_list())
