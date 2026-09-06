@@ -38,13 +38,14 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --dev
 
-      - name: Run unit and API tests
+      - name: Run backend test suite
         run: |
           mkdir -p test-results
           uv run pytest \
             --junitxml=test-results/pytest.xml \
             --cov-report=term-missing \
-            --cov-report=xml:test-results/coverage.xml
+            --cov-report=xml:test-results/coverage.xml \
+            --cov-report=html:test-results/htmlcov
 
       - name: Upload backend test reports
         if: always()
