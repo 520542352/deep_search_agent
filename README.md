@@ -244,7 +244,7 @@ uv sync --dev
 uv run pytest
 ```
 
-测试覆盖路径与 SQL 安全校验、异步会话上下文、文件工具、Agent 辅助逻辑、FastAPI 文件和 WebSocket 接口，以及 Tavily、RAGFlow、MySQL 的离线适配器契约。当前覆盖率最低门槛为 60%；低于该基线时测试命令会失败。
+测试覆盖路径与 SQL 安全校验、异步会话上下文、文件工具、Agent 辅助逻辑、FastAPI 文件和 WebSocket 接口，以及 Tavily、RAGFlow、MySQL 的离线适配器契约。覆盖率同时统计语句和分支，当前全量测试最低门槛为 85%；低于该质量门禁时测试命令和 CI 都会失败。
 
 仅运行快速单元测试或 API 测试：
 
@@ -253,6 +253,14 @@ uv run pytest -m unit --no-cov
 uv run pytest -m api --no-cov
 uv run pytest -m contract --no-cov
 ```
+
+各分组命令用于快速定位问题，不单独执行全项目覆盖率门禁。需要在本地生成可浏览的覆盖率报告时运行：
+
+```bash
+uv run pytest --cov-report=html
+```
+
+报告入口为 `htmlcov/index.html`；GitHub Actions 还会在 `backend-test-reports` 构件中保存 JUnit XML、Coverage XML 和 HTML 覆盖率报告。
 
 ## 📄 License
 

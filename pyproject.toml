@@ -57,8 +57,9 @@ addopts = [
     "--cov=api",
     "--cov=tools",
     "--cov=utils",
+    "--cov-branch",
     "--cov-report=term-missing",
-    "--cov-fail-under=60",
+    "--cov-fail-under=85",
     "--basetemp=tmp"
 ]
 markers = [
