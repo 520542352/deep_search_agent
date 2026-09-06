@@ -45,6 +45,20 @@ class TaskRequest(BaseModel):
     thread_id: str | None = None
 
 
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _handle_background_task(task: asyncio.Task) -> None:
+    """Keep task references until completion and report unexpected failures."""
+    _background_tasks.discard(task)
+    try:
+        error = task.exception()
+    except asyncio.CancelledError:
+        return
+    if error is not None:
+        logger.error(f"Agent background task failed: {error}")
+
+
 # 开启任务接口实现
 @app.post("/api/task")
 async def run_task(request: TaskRequest):
@@ -64,6 +78,9 @@ async def run_task(request: TaskRequest):
     Args:
         request (TaskRequest): 包含用户 query 和可选 thread_id 的请求体。
     """
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="query 不能为空")
+
     # 1. ID 初始化
     thread_id = request.thread_id or str(uuid.uuid4())
     try:
@@ -72,7 +89,9 @@ async def run_task(request: TaskRequest):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     # 2. 后台异步执行 Agent
-    asyncio.create_task(run_deep_agent(request.query, thread_id))
+    task = asyncio.create_task(run_deep_agent(request.query, thread_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_handle_background_task)
     # result = await run_deep_agent(request.query, thread_id)
 
     return {"status":"started", "thread_id":thread_id}
@@ -98,22 +117,38 @@ async def upload_files(files: List[UploadFile] = File(...),thread_id: str = Form
         validate_thread_id(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    # 1. 确保上传目录存在
-    target_dir = upload_dir/f"session_{thread_id}"
-    target_dir.mkdir(exist_ok=True, parents=True)
-
-    # 2. 保存并写入文件
-    saved_files = []
+    # 1. 先校验全部文件名，避免保存一部分后才发现非法输入
+    validated_files = []
     for file in files:
         # UploadFile.filename 来自客户端，只保留文件名，防止../或者绝对路径越界
         safe_filename = Path(file.filename or "").name
         if not safe_filename or safe_filename in {".", ".."}:
-            return {"error":"无效的文件命"}
+            raise HTTPException(status_code=400, detail="无效的文件名")
+        validated_files.append((file, safe_filename))
+
+    # 2. 确保上传目录存在
+    target_dir = upload_dir/f"session_{thread_id}"
+    try:
+        target_dir.mkdir(exist_ok=True, parents=True)
+    except OSError as exc:
+        logger.error(f"创建上传目录失败: {exc}")
+        raise HTTPException(status_code=500, detail="无法创建上传目录") from exc
+
+    saved_files = []
+    for file, safe_filename in validated_files:
         file_path = target_dir / safe_filename
         # 使用二进制模式写入
         # shutil.copyfileobj 高效复制文件流，避免一次性加载大文件到内存
-        with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        try:
+            with file_path.open("wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+        except OSError as exc:
+            try:
+                file_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                logger.warning(f"清理未完成的上传文件失败: {cleanup_error}")
+            logger.error(f"保存上传文件失败: {exc}")
+            raise HTTPException(status_code=500, detail="保存上传文件失败") from exc
         saved_files.append(safe_filename)
 
     # 3.返回成功保存的文件列表
@@ -138,14 +173,16 @@ async def download_file(path:str):
         abs_path = Path(path).resolve()
         output_path = output_dir.resolve()
         if not abs_path.is_relative_to(output_path):
-            return {"error":"拒绝访问：只能下载输出目录下的文件"}
+            raise HTTPException(status_code=403, detail="拒绝访问：只能下载输出目录下的文件")
 
-    except Exception:
-        return {"error":"无效的路径参数"}
+    except HTTPException:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="无效的路径参数") from exc
 
     # 2.存在性检查
-    if not abs_path.exists():
-        return {"error":"文件不存在"}
+    if not abs_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
 
     # 3.返回文件流
     return FileResponse(abs_path, filename=abs_path.name)
@@ -172,15 +209,17 @@ async def list_files(path: str):
         # 2.安全检查
         if not abs_path.is_relative_to(output_path):
             logger.error(f"[ERROR]拒绝访问:{abs_path} 不在{output_path}目录下")
-            return {"error":"拒绝访问：只能访问输出目录下的文件"}
+            raise HTTPException(status_code=403, detail="拒绝访问：只能访问输出目录下的文件")
 
-    except Exception as e:
+    except HTTPException:
+        raise
+    except (OSError, RuntimeError, ValueError) as e:
         logger.error(f"路径解析失败:{e}")
-        return {"error":f"路径无效{e}"}
+        raise HTTPException(status_code=400, detail="路径无效") from e
 
     # 3.检查目录是否存在
-    if not abs_path.exists():
-        return {"error":"目录不存在"}
+    if not abs_path.is_dir():
+        raise HTTPException(status_code=404, detail="目录不存在")
 
     files = []
     try:
@@ -198,7 +237,7 @@ async def list_files(path: str):
                 })
     except Exception as e:
         logger.error(f"遍历文件失败{e}")
-        return {"error":str(e)}
+        raise HTTPException(status_code=500, detail="遍历文件失败") from e
 
     # 按修改时间倒序排序
     files.sort(key=lambda x: x.get("mtime",0), reverse=True)
@@ -224,6 +263,12 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     :param websocket: websocket连接实例
     :param thread_id: 会话id的唯一标识
     """
+    try:
+        validate_thread_id(thread_id)
+    except ValueError:
+        await websocket.close(code=1008, reason="无效的 thread_id")
+        return
+
     # 1.建立连接并绑定到管理器
     await manager.connect(websocket, thread_id)
     try:
