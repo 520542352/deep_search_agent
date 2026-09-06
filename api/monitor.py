@@ -123,8 +123,9 @@ class ConnectionManager:
         return self.loop
 
     async def connect(self, websocket: WebSocket, thread_id: str):
-        # 每次连接时尝试获取/更新 loop
-        self.get_loop()
+        # TestClient、服务重载等场景可能更换事件循环，因此每次连接都重新绑定。
+        self.loop = asyncio.get_running_loop()
+        monitor.set_websocket_manager(self)
 
         await websocket.accept()
         self.active_connections[thread_id] = websocket

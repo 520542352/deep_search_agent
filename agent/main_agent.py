@@ -45,34 +45,33 @@ project_root_path = Path(__file__).parents[1].resolve()
 # 3.创建辅助函数
 
 async def run_deep_agent(task_query: str, thread_id: str = None):
-    # 1.[准备环境] 创建目录、处理上传文件
-    session_dir_str, relative_session_dir, upload_info = _prepare_session_environment(thread_id)
-
-    # 2. [上下文绑定] 初始化ContextVars（用于隔离并发请求）
-    thread_token = set_thread_context(thread_id)
-    session_token = set_session_context(session_dir_str)
-    # 监控埋点
-    monitor.report_session_dir(session_dir_str)
-
-    #3. [运行时配置] Langchain Config
-    config = {
-        "configurable":{"thread_id":thread_id},
-    }
-
-    # 4. [提示词构建] 动态注入环境约束
-    path_instruction = f"""
-    [工作目录环境指令]
-    工作目录：{relative_session_dir}
-    {upload_info}
-    
-    规则：
-    1. 新生成文件必须保存到工作目录：'{relative_session_dir}/filename'
-    2. 使用相对路径，禁止使用绝对路径
-    3. 若存在上传文件，请先分析内容
-    """
-
-    # 5. [流式执行] 启动Agent循环
+    session_token = None
+    thread_token = None
     try:
+        # 1.[准备环境] 创建目录、处理上传文件
+        session_dir_str, relative_session_dir, upload_info = _prepare_session_environment(thread_id)
+
+        # 2. [上下文绑定] 初始化ContextVars（用于隔离并发请求）
+        thread_token = set_thread_context(thread_id)
+        session_token = set_session_context(session_dir_str)
+        monitor.report_session_dir(session_dir_str)
+
+        # 3. [运行时配置] Langchain Config
+        config = {"configurable": {"thread_id": thread_id}}
+
+        # 4. [提示词构建] 动态注入环境约束
+        path_instruction = f"""
+        [工作目录环境指令]
+        工作目录：{relative_session_dir}
+        {upload_info}
+
+        规则：
+        1. 新生成文件必须保存到工作目录：'{relative_session_dir}/filename'
+        2. 使用相对路径，禁止使用绝对路径
+        3. 若存在上传文件，请先分析内容
+        """
+
+        # 5. [流式执行] 启动Agent循环
         async for chunk in main_agent.astream(
                 {"messages":[{"role":"user", "content":task_query + path_instruction}]},
                 config=config
@@ -88,7 +87,7 @@ async def run_deep_agent(task_query: str, thread_id: str = None):
 
     finally:
         # 7. [资源处理] 必须重置ContextVars，防止线程池复用导致上下文污染
-        if "session_token" in locals():
+        if session_token is not None:
             reset_session_context(session_token, thread_token)
 
 

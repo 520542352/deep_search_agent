@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from pypdf import PdfReader
+import docx
+from pypdf import PdfReader, PdfWriter
 
 from api.context import set_session_context
 from tools import markdown_tool, pdf_tool, upload_file_read_tool
@@ -138,3 +139,89 @@ def test_html_pdf_renderer_removes_partial_file_on_failure(
 
     assert result == "转换失败: renderer unavailable"
     assert not pdf_file.exists()
+
+
+@pytest.mark.unit
+def test_read_docx_extracts_paragraphs(tmp_path: Path) -> None:
+    set_session_context(str(tmp_path))
+    document = docx.Document()
+    document.add_paragraph("第一段")
+    document.add_paragraph("第二段")
+    document.save(tmp_path / "sample.docx")
+
+    result = upload_file_read_tool.read_file.invoke({"filename": "sample.docx"})
+
+    assert result == "第一段\n第二段"
+
+
+@pytest.mark.unit
+def test_read_blank_pdf_returns_empty_text(tmp_path: Path) -> None:
+    set_session_context(str(tmp_path))
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    with (tmp_path / "blank.pdf").open("wb") as output:
+        writer.write(output)
+
+    result = upload_file_read_tool.read_file.invoke({"filename": "blank.pdf"})
+
+    assert result == ""
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("filename", "dependency", "expected"),
+    [
+        ("sample.docx", "docx", "未安装 py-docx"),
+        ("sample.pdf", "pypdf", "未安装 pypdf"),
+        ("sample.xlsx", "pd", "未安装pandas"),
+    ],
+)
+def test_read_file_reports_missing_optional_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    dependency: str,
+    expected: str,
+) -> None:
+    set_session_context(str(tmp_path))
+    (tmp_path / filename).write_bytes(b"placeholder")
+    monkeypatch.setattr(upload_file_read_tool, dependency, None)
+
+    result = upload_file_read_tool.read_file.invoke({"filename": filename})
+
+    assert expected in result
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("filename", ["broken.docx", "broken.pdf"])
+def test_read_file_converts_corrupt_document_error(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    set_session_context(str(tmp_path))
+    (tmp_path / filename).write_bytes(b"not a document")
+
+    result = upload_file_read_tool.read_file.invoke({"filename": filename})
+
+    assert result.startswith("读取文件出错")
+
+
+@pytest.mark.unit
+def test_read_file_converts_corrupt_excel_error(tmp_path: Path) -> None:
+    set_session_context(str(tmp_path))
+    (tmp_path / "broken.xlsx").write_bytes(b"not an excel workbook")
+
+    result = upload_file_read_tool.read_file.invoke({"filename": "broken.xlsx"})
+
+    assert result.startswith("读取 Excel 失败")
+
+
+@pytest.mark.unit
+def test_read_file_handles_missing_and_binary_files(tmp_path: Path) -> None:
+    set_session_context(str(tmp_path))
+    missing = upload_file_read_tool.read_file.invoke({"filename": "missing.txt"})
+    (tmp_path / "sample.bin").write_bytes(b"\xff\xfe\x00")
+    binary = upload_file_read_tool.read_file.invoke({"filename": "sample.bin"})
+
+    assert "不存在" in missing
+    assert "不支持的文件格式'.bin'" in binary
