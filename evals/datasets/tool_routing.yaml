@@ -1,0 +1,77 @@
+version: 1
+suite: tool-routing
+description: 验证主 Agent 对公开信息、内部知识、数据库和文件任务的路由选择
+cases:
+  - id: route-public-latest-news
+    category: tool_routing
+    query: 查询近期公开发布的人工智能行业政策，并总结主要变化。
+    description: 时效性公开信息应交给网络搜索助手
+    tags: [routing, network]
+    required_services: [llm, tavily]
+    expected_subagents: [网络搜索助手]
+    forbidden_subagents: [数据库查询助手, RAGFlow助手]
+    tools:
+      required: [internet_search]
+      max_calls: 5
+
+  - id: route-internal-manual
+    category: tool_routing
+    query: 根据公司内部安装手册说明窗式空调的安装注意事项。
+    description: 企业内部文档问题应交给 RAGFlow 助手
+    tags: [routing, rag]
+    required_services: [llm, ragflow]
+    required_test_data: [包含安装手册的测试知识库和可查询助手]
+    expected_subagents: [RAGFlow助手]
+    forbidden_subagents: [数据库查询助手]
+    tools:
+      required: [get_assistant_list, create_ask_delete]
+      ordered: [get_assistant_list, create_ask_delete]
+
+  - id: route-product-inventory
+    category: tool_routing
+    query: 查询企业数据库中库存量最低的五款空调商品。
+    description: 精确商品数据应交给数据库查询助手
+    tags: [routing, database]
+    required_services: [llm, mysql]
+    required_test_data: [包含商品和库存字段的只读测试表]
+    expected_subagents: [数据库查询助手]
+    forbidden_subagents: [网络搜索助手]
+    tools:
+      required: [list_sql_tables, execute_sql_query]
+      ordered: [list_sql_tables, execute_sql_query]
+
+  - id: route-public-vs-internal-comparison
+    category: tool_routing
+    query: 对比公开市场趋势、公司内部售后规范和企业商品数据，给出综合建议。
+    description: 混合信息任务应协调全部三个子 Agent
+    tags: [routing, multi-agent]
+    required_services: [llm, tavily, ragflow, mysql]
+    required_test_data: [售后规范测试知识库, 商品只读测试表]
+    expected_subagents: [网络搜索助手, RAGFlow助手, 数据库查询助手]
+    tools:
+      required: [internet_search, get_assistant_list, create_ask_delete, list_sql_tables]
+
+  - id: route-public-answer-without-file
+    category: tool_routing
+    query: 查询并直接回答目前公开的主流 RAG 评测指标，不需要生成文件。
+    description: 未要求文件时不得调用文档生成工具
+    tags: [routing, network, no-file]
+    required_services: [llm, tavily]
+    expected_subagents: [网络搜索助手]
+    tools:
+      required: [internet_search]
+      forbidden: [generate_markdown, convert_md_to_pdf]
+
+  - id: route-public-report-to-pdf
+    category: tool_routing
+    query: 搜索公开的 AI Agent 测试方法，整理为 Markdown，并转换成 PDF 报告。
+    description: 应先检索，再生成 Markdown，最后转换 PDF
+    tags: [routing, network, file]
+    required_services: [llm, tavily]
+    expected_subagents: [网络搜索助手]
+    tools:
+      required: [internet_search, generate_markdown, convert_md_to_pdf]
+      ordered: [internet_search, generate_markdown, convert_md_to_pdf]
+      max_calls: 8
+    files:
+      required_extensions: [md, pdf]

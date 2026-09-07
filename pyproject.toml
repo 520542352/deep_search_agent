@@ -57,6 +57,7 @@ addopts = [
     "--cov=api",
     "--cov=tools",
     "--cov=utils",
+    "--cov=evals",
     "--cov-branch",
     "--cov-report=term-missing",
     "--cov-fail-under=85",
@@ -66,5 +67,6 @@ markers = [
     "unit: fast tests without external services",
     "api: FastAPI and WebSocket boundary tests",
     "contract: offline adapter contract tests for external services",
+    "eval: deterministic tests for Agent evaluation datasets and scorers",
 ]
 tmp_path_retention_count = 0

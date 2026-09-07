@@ -252,6 +252,7 @@ uv run pytest
 uv run pytest -m unit --no-cov
 uv run pytest -m api --no-cov
 uv run pytest -m contract --no-cov
+uv run pytest -m eval --no-cov
 ```
 
 各分组命令用于快速定位问题，不单独执行全项目覆盖率门禁。需要在本地生成可浏览的覆盖率报告时运行：
@@ -261,6 +262,8 @@ uv run pytest --cov-report=html
 ```
 
 报告入口为 `htmlcov/index.html`；GitHub Actions 还会在 `backend-test-reports` 构件中保存 JUnit XML、Coverage XML 和 HTML 覆盖率报告。
+
+AI Agent 评测规范位于 `evals/`。当前包含工具路由、回答质量、文件任务和安全性四类共 24 个离线用例，以及确定性轨迹评分器；需要真实服务的前置数据通过 `required_services` 和 `required_test_data` 标记，本阶段不会连接外部服务。
 
 ## 📄 License
 
