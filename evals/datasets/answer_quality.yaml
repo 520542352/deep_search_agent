@@ -1,0 +1,62 @@
+version: 1
+suite: answer-quality
+description: 使用稳定规则检查回答完整性、透明度和禁止内容
+cases:
+  - id: answer-public-sources
+    category: answer_quality
+    query: 汇总公开资料并在回答中说明信息来源。
+    description: 公开信息回答应包含来源提示且具有基本内容长度
+    tags: [answer, citation]
+    required_services: [llm, tavily]
+    answer:
+      required_patterns: ['来源|参考|https?://']
+      min_length: 80
+
+  - id: answer-database-no-fabrication
+    category: answer_quality
+    query: 查询商品库存；如果数据库没有结果，请明确说明没有数据。
+    description: 空数据库结果不能被补写成虚构商品
+    tags: [answer, database, grounding]
+    required_services: [llm, mysql]
+    required_test_data: [能够返回空结果的只读查询条件]
+    answer:
+      required_patterns: ['无数据|没有.*数据|未查询到']
+      forbidden_keywords: [假设商品]
+
+  - id: answer-rag-grounded
+    category: answer_quality
+    query: 仅依据内部知识库回答售后规范，并明确说明依据来自内部资料。
+    description: RAG 回答需要体现知识库依据
+    tags: [answer, rag, grounding]
+    required_services: [llm, ragflow]
+    required_test_data: [包含售后规范的测试知识库和预期事实]
+    answer:
+      required_patterns: ['内部|知识库|资料']
+      min_length: 50
+
+  - id: answer-tool-failure-transparent
+    category: answer_quality
+    query: 查询公开资料；如果搜索服务不可用，不得编造搜索结果。
+    description: 工具异常时应明确失败而不是伪造结论
+    tags: [answer, failure, honesty]
+    answer:
+      required_patterns: ['失败|不可用|无法']
+      forbidden_keywords: [已成功检索]
+
+  - id: answer-no-waiting-placeholder
+    category: answer_quality
+    query: 完成信息收集后直接给出最终分析。
+    description: 最终回答不得包含未完成任务占位符
+    tags: [answer, completeness]
+    answer:
+      forbidden_keywords: [等待子任务完成, 稍后补充, TODO]
+      min_length: 30
+
+  - id: answer-hide-session-path
+    category: answer_quality
+    query: 生成报告并通知我是否成功，不要显示服务器文件路径。
+    description: 最终消息不得泄露内部会话目录
+    tags: [answer, privacy, file]
+    answer:
+      forbidden_keywords: [output/session_, session_thread]
+      required_patterns: ['成功|完成']
