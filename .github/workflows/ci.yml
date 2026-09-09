@@ -47,6 +47,9 @@ jobs:
             --cov-report=xml:test-results/coverage.xml \
             --cov-report=html:test-results/htmlcov
 
+      - name: Run offline Agent trajectory evaluations
+        run: uv run python -m evals.offline --report test-results/offline-eval.json
+
       - name: Upload backend test reports
         if: always()
         uses: actions/upload-artifact@v7

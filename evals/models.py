@@ -123,3 +123,19 @@ class CaseScore(StrictModel):
     passed: bool
     score: float = Field(ge=0, le=1)
     criteria: list[CriterionResult]
+
+
+class CaseEvaluation(StrictModel):
+    case_id: str
+    category: EvalCategory
+    actual: AgentRunResult
+    score: CaseScore
+
+
+class SuiteReport(StrictModel):
+    total: int = Field(ge=0)
+    passed: int = Field(ge=0)
+    pass_rate: float = Field(ge=0, le=1)
+    mean_score: float = Field(ge=0, le=1)
+    category_pass_rate: dict[str, float]
+    cases: list[CaseEvaluation]

@@ -265,6 +265,14 @@ uv run pytest --cov-report=html
 
 AI Agent 评测规范位于 `evals/`。当前包含工具路由、回答质量、文件任务和安全性四类共 24 个离线用例，以及确定性轨迹评分器；需要真实服务的前置数据通过 `required_services` 和 `required_test_data` 标记，本阶段不会连接外部服务。
 
+运行离线 Agent 参考轨迹并生成 JSON 报告：
+
+```bash
+uv run python -m evals.offline
+```
+
+离线报告用于验证 Agent 事件采集、工具轨迹、文件产物和评分管道，不代表真实 LLM 的回答质量。
+
 ## 📄 License
 
 本项目基于 [MIT License](LICENSE) 开源。
