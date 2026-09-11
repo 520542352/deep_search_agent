@@ -1,4 +1,5 @@
 import json
+import time
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -57,6 +58,27 @@ def _snapshot_files(session_dir: Path | None) -> set[Path]:
     return {path.resolve() for path in session_dir.rglob("*") if path.is_file()}
 
 
+def _message_usage(message: BaseMessage | None) -> tuple[int, int, int]:
+    if message is None:
+        return 0, 0, 0
+    usage = getattr(message, "usage_metadata", None) or {}
+    response_metadata = getattr(message, "response_metadata", None) or {}
+    provider_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
+    input_tokens = int(
+        usage.get("input_tokens", provider_usage.get("prompt_tokens", provider_usage.get("input_tokens", 0)))
+        or 0
+    )
+    output_tokens = int(
+        usage.get("output_tokens", provider_usage.get("completion_tokens", provider_usage.get("output_tokens", 0)))
+        or 0
+    )
+    total_tokens = int(
+        usage.get("total_tokens", provider_usage.get("total_tokens", input_tokens + output_tokens))
+        or input_tokens + output_tokens
+    )
+    return input_tokens, output_tokens, total_tokens
+
+
 async def collect_agent_run(
     agent: EventStreamingAgent,
     query: str,
@@ -71,6 +93,10 @@ async def collect_agent_run(
     subagent_calls: list[str] = []
     answer = ""
     error: str | None = None
+    input_tokens = 0
+    output_tokens = 0
+    total_tokens = 0
+    started_at = time.perf_counter()
 
     try:
         async for event in agent.astream_events(
@@ -93,10 +119,16 @@ async def collect_agent_run(
                 elif tool_name:
                     tool_calls.append(ToolCall(name=tool_name, arguments=arguments))
 
-            elif event_name == "on_chat_model_end" and metadata.get("ls_agent_type") != "subagent":
-                candidate = _message_text(_message_from_output(data.get("output")))
-                if candidate:
-                    answer = candidate
+            elif event_name == "on_chat_model_end":
+                message = _message_from_output(data.get("output"))
+                message_input, message_output, message_total = _message_usage(message)
+                input_tokens += message_input
+                output_tokens += message_output
+                total_tokens += message_total
+                if metadata.get("ls_agent_type") != "subagent":
+                    candidate = _message_text(message)
+                    if candidate:
+                        answer = candidate
 
             elif event_name in {"on_chain_error", "on_tool_error", "on_chat_model_error"}:
                 event_error = data.get("error")
@@ -112,6 +144,10 @@ async def collect_agent_run(
         subagent_calls=subagent_calls,
         generated_files=generated_files,
         error=error,
+        duration_seconds=time.perf_counter() - started_at,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens or input_tokens + output_tokens,
     )
 
 
