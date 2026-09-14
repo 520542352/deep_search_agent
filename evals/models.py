@@ -110,6 +110,10 @@ class AgentRunResult(StrictModel):
     subagent_calls: list[str] = Field(default_factory=list)
     generated_files: list[Path] = Field(default_factory=list)
     error: str | None = None
+    duration_seconds: float = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
 
 
 class CriterionResult(StrictModel):

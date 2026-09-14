@@ -30,3 +30,23 @@ uv run python -m evals.offline
 ```
 
 默认报告写入 `eval-results/offline-report.json`。默认 CI 也会执行该命令，并将结果保存为 `backend-test-reports` 构件中的 `offline-eval.json`。该结果只证明离线轨迹管道和规则一致，不能作为真实模型质量分数。
+
+## 真实服务评测
+
+`live_datasets/` 是与当前测试环境匹配的真实评测 profile。真实评测必须显式运行，不属于默认 `pytest` 或 PR CI：
+
+```bash
+uv run python -m evals.live --preflight-only
+uv run python -m evals.live --repeats 1
+```
+
+程序会先检查 LLM、Tavily、RAGFlow 和只读 MySQL；任何一项失败都会以退出码 2 跳过正式运行。每个用例具有独立目录和超时，并记录成功率、规则得分、耗时、Token 以及按类别结果。配置 `LIVE_EVAL_INPUT_USD_PER_MILLION` 和 `LIVE_EVAL_OUTPUT_USD_PER_MILLION` 后还会估算成本。
+
+原始报告写入被 Git 忽略的 `eval-results/`。要建立或对比只含汇总指标的基线：
+
+```bash
+uv run python -m evals.live --save-baseline eval-results/live-baseline.json
+uv run python -m evals.live --baseline evals/baselines/live-baseline.json
+```
+
+GitHub Actions 的 `Live Agent evaluations` 只能通过 `workflow_dispatch` 手动触发；需在 `live-evals` Environment 中配置 Secrets。若 MySQL 或 RAGFlow 不允许 GitHub 托管 Runner 访问，应只在本地运行，或改用处于同一网络的自托管 Runner。

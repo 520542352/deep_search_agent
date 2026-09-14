@@ -273,6 +273,15 @@ uv run python -m evals.offline
 
 离线报告用于验证 Agent 事件采集、工具轨迹、文件产物和评分管道，不代表真实 LLM 的回答质量。
 
+真实 Agent 评测是显式、非默认任务，会消耗模型和搜索额度并访问测试数据：
+
+```bash
+uv run python -m evals.live --preflight-only
+uv run python -m evals.live --repeats 1
+```
+
+详细的 profile、重复运行、超时、报告和基线说明见 `evals/README.md`。默认 CI 仍然只运行离线测试；真实评测只能通过独立的手动 GitHub Actions 工作流触发。
+
 ## 📄 License
 
 本项目基于 [MIT License](LICENSE) 开源。

@@ -1,0 +1,68 @@
+name: Live Agent evaluations
+
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: Runs per evaluation case
+        required: true
+        default: "1"
+      timeout:
+        description: Timeout per case in seconds
+        required: true
+        default: "180"
+
+permissions:
+  contents: read
+
+jobs:
+  live-evals:
+    name: Real model and service evaluations
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: live-evals
+    env:
+      LLM: ${{ secrets.LLM }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      RAGFLOW_API_URL: ${{ secrets.RAGFLOW_API_URL }}
+      RAGFLOW_API_KEY: ${{ secrets.RAGFLOW_API_KEY }}
+      MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+      MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+      MYSQL_USER: ${{ secrets.MYSQL_USER }}
+      MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+      MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+      LIVE_EVAL_INPUT_USD_PER_MILLION: ${{ vars.LIVE_EVAL_INPUT_USD_PER_MILLION }}
+      LIVE_EVAL_OUTPUT_USD_PER_MILLION: ${{ vars.LIVE_EVAL_OUTPUT_USD_PER_MILLION }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.12"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --dev
+
+      - name: Run live evaluations
+        run: |
+          uv run python -m evals.live \
+            --repeats "${{ inputs.repeats }}" \
+            --timeout "${{ inputs.timeout }}" \
+            --report eval-results/live-report.json \
+            --save-baseline eval-results/live-metrics.json
+
+      - name: Upload metric-only live report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-agent-evaluation-report
+          path: eval-results/live-metrics.json
+          if-no-files-found: warn
+          retention-days: 14
