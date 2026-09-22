@@ -40,6 +40,7 @@ pip-delete-this-directory.txt
 htmlcov/
 /test-results/
 /eval-results/
+/data/
 .tox/
 .nox/
 .coverage

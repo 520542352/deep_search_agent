@@ -125,6 +125,8 @@ deep-search-agent/
 │   ├── path_utils.py                 # 路径规范化与越界防护
 │   └── pdf_renderer.py               # Markdown → HTML → PDF
 ├── prompt/prompts.yaml             # 主子 Agent 角色与工作流
+├── persistence/                    # SQLite 连接、迁移与业务数据表
+├── data/                           # 本地持久化数据库（Git 忽略）
 ├── output/                        # 会话输出（Git 忽略）
 ├── upload/                        # 临时上传（Git 忽略）
 ├── pyproject.toml
@@ -174,6 +176,9 @@ MYSQL_PORT=3306
 MYSQL_USER=readonly_user
 MYSQL_PASSWORD=your_password
 MYSQL_DATABASE=your_database
+
+# 可选：业务数据库位置，默认 data/application.db
+DEEP_SEARCH_DATABASE_PATH=/path/to/application.db
 ```
 
 ### 4. 启动后端

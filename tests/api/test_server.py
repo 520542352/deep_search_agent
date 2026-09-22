@@ -12,10 +12,26 @@ from api import server
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "output_dir", tmp_path / "output")
     monkeypatch.setattr(server, "upload_dir", tmp_path / "upload")
+    monkeypatch.setattr(server, "database_path", tmp_path / "data" / "application.db")
     server.output_dir.mkdir()
     server.upload_dir.mkdir()
     with TestClient(server.app) as test_client:
         yield test_client
+
+
+@pytest.mark.api
+def test_application_lifespan_initializes_and_closes_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "data" / "application.db"
+    monkeypatch.setattr(server, "database_path", database_path)
+
+    with TestClient(server.app):
+        database = server.app.state.database
+        assert database.path == database_path
+        assert database.is_connected is True
+
+    assert database.is_connected is False
 
 
 @pytest.mark.api

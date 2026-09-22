@@ -1,6 +1,7 @@
 import sys
 import uuid
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
@@ -11,6 +12,7 @@ import shutil
 from loguru import logger
 
 from utils.path_utils import validate_thread_id
+from persistence.database import Database, resolve_database_path
 
 # 配置项目路径到环境变量
 project_root = Path(__file__).resolve().parents[1]
@@ -21,7 +23,21 @@ if str(project_root) not in sys.path:
 from agent.main_agent import run_deep_agent
 from api.monitor import monitor,manager
 
-app = FastAPI(title="DeepAgents API")
+database_path = resolve_database_path(project_root)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    database = Database(database_path)
+    await database.connect()
+    app.state.database = database
+    try:
+        yield
+    finally:
+        await database.close()
+
+
+app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 
 # 挂载输出目录，以便前端访问文件
 output_dir = project_root / "output"
