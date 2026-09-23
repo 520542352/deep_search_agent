@@ -179,6 +179,9 @@ MYSQL_DATABASE=your_database
 
 # 可选：业务数据库位置，默认 data/application.db
 DEEP_SEARCH_DATABASE_PATH=/path/to/application.db
+
+# 可选：LangGraph Checkpoint 数据库位置，默认 data/checkpoints.db
+DEEP_SEARCH_CHECKPOINT_PATH=/path/to/checkpoints.db
 ```
 
 ### 4. 启动后端

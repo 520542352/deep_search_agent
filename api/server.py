@@ -13,6 +13,7 @@ from loguru import logger
 
 from utils.path_utils import validate_thread_id
 from persistence.database import Database, resolve_database_path
+from agent.runtime import AgentRuntime, resolve_checkpoint_path
 
 # 配置项目路径到环境变量
 project_root = Path(__file__).resolve().parents[1]
@@ -20,20 +21,28 @@ if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
 # 导入agent已经monitor
-from agent.main_agent import run_deep_agent
+from agent.main_agent import build_main_agent, run_deep_agent
 from api.monitor import monitor,manager
 
 database_path = resolve_database_path(project_root)
+checkpoint_path = resolve_checkpoint_path(project_root)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database = Database(database_path)
+    agent_runtime = AgentRuntime(
+        checkpoint_path,
+        agent_factory=build_main_agent,
+    )
     await database.connect()
-    app.state.database = database
     try:
+        await agent_runtime.start()
+        app.state.database = database
+        app.state.agent_runtime = agent_runtime
         yield
     finally:
+        await agent_runtime.close()
         await database.close()
 
 
@@ -105,7 +114,13 @@ async def run_task(request: TaskRequest):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     # 2. 后台异步执行 Agent
-    task = asyncio.create_task(run_deep_agent(request.query, thread_id))
+    task = asyncio.create_task(
+        run_deep_agent(
+            request.query,
+            thread_id,
+            agent=app.state.agent_runtime.agent,
+        )
+    )
     _background_tasks.add(task)
     task.add_done_callback(_handle_background_task)
     # result = await run_deep_agent(request.query, thread_id)

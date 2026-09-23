@@ -332,9 +332,9 @@ async def evaluate_live_suite(
     if repeats < 1:
         raise ValueError("repeats 必须大于等于 1")
     if graph is None:
-        from agent.main_agent import main_agent
+        from agent.main_agent import build_main_agent
 
-        graph = main_agent
+        graph = build_main_agent()
     workspace_path = Path(workspace)
     evaluations: list[CaseEvaluation] = []
     for case in cases:

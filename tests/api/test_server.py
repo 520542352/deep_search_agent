@@ -13,6 +13,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "output_dir", tmp_path / "output")
     monkeypatch.setattr(server, "upload_dir", tmp_path / "upload")
     monkeypatch.setattr(server, "database_path", tmp_path / "data" / "application.db")
+    monkeypatch.setattr(server, "checkpoint_path", tmp_path / "data" / "checkpoints.db")
     server.output_dir.mkdir()
     server.upload_dir.mkdir()
     with TestClient(server.app) as test_client:
@@ -24,14 +25,21 @@ def test_application_lifespan_initializes_and_closes_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path = tmp_path / "data" / "application.db"
+    checkpoint_path = tmp_path / "data" / "checkpoints.db"
     monkeypatch.setattr(server, "database_path", database_path)
+    monkeypatch.setattr(server, "checkpoint_path", checkpoint_path)
 
     with TestClient(server.app):
         database = server.app.state.database
+        agent_runtime = server.app.state.agent_runtime
         assert database.path == database_path
         assert database.is_connected is True
+        assert agent_runtime.path == checkpoint_path
+        assert agent_runtime.is_started is True
+        assert checkpoint_path.is_file()
 
     assert database.is_connected is False
+    assert agent_runtime.is_started is False
 
 
 @pytest.mark.api
@@ -68,7 +76,11 @@ def test_task_schedules_agent(client: TestClient, monkeypatch: pytest.MonkeyPatc
 
     assert response.status_code == 200
     assert response.json() == {"status": "started", "thread_id": "thread-a"}
-    run_agent.assert_called_once_with("research", "thread-a")
+    run_agent.assert_called_once_with(
+        "research",
+        "thread-a",
+        agent=server.app.state.agent_runtime.agent,
+    )
     assert not server._background_tasks
 
 

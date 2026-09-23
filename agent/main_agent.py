@@ -33,18 +33,29 @@ subagents_list = [
     database_query_agent,
     network_search_agent
 ]
-# 2.创建主智能体
-main_agent = create_deep_agent(
-    model=model,
-    subagents=subagents_list,
-    tools=[generate_markdown, convert_md_to_pdf, read_file],
-    system_prompt=main_agent_config["system_prompt"]
-)
+main_agent_tools = [generate_markdown, convert_md_to_pdf, read_file]
+
+
+def build_main_agent(
+    checkpointer=None,
+    *,
+    chat_model=model,
+    subagents=None,
+    tools=None,
+):
+    """Build the main graph with dependencies owned by the application runtime."""
+    return create_deep_agent(
+        model=chat_model,
+        subagents=subagents_list if subagents is None else subagents,
+        tools=main_agent_tools if tools is None else tools,
+        system_prompt=main_agent_config["system_prompt"],
+        checkpointer=checkpointer,
+    )
 
 project_root_path = Path(__file__).parents[1].resolve()
 # 3.创建辅助函数
 
-async def run_deep_agent(task_query: str, thread_id: str = None):
+async def run_deep_agent(task_query: str, thread_id: str = None, *, agent):
     session_token = None
     thread_token = None
     try:
@@ -72,7 +83,7 @@ async def run_deep_agent(task_query: str, thread_id: str = None):
         """
 
         # 5. [流式执行] 启动Agent循环
-        async for chunk in main_agent.astream(
+        async for chunk in agent.astream(
                 {"messages":[{"role":"user", "content":task_query + path_instruction}]},
                 config=config
         ):

@@ -2,9 +2,24 @@ from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import main_agent
 from api.context import get_session_context, get_thread_context
+from evals.fakes import ScriptedChatModel
+
+
+@pytest.mark.unit
+def test_build_main_agent_uses_injected_checkpointer() -> None:
+    checkpointer = InMemorySaver()
+    graph = main_agent.build_main_agent(
+        checkpointer,
+        chat_model=ScriptedChatModel(responses=[AIMessage(content="done")]),
+        subagents=[],
+        tools=[],
+    )
+
+    assert graph.checkpointer is checkpointer
 
 
 @pytest.mark.unit
@@ -87,7 +102,6 @@ async def test_run_agent_builds_request_consumes_stream_and_resets_context(
     )
     session_reports: list[str] = []
     result_reports: list[str] = []
-    monkeypatch.setattr(main_agent, "main_agent", agent)
     monkeypatch.setattr(
         main_agent,
         "_prepare_session_environment",
@@ -96,7 +110,7 @@ async def test_run_agent_builds_request_consumes_stream_and_resets_context(
     monkeypatch.setattr(main_agent.monitor, "report_session_dir", session_reports.append)
     monkeypatch.setattr(main_agent.monitor, "report_task_result", result_reports.append)
 
-    result = await main_agent.run_deep_agent("research", "thread-a")
+    result = await main_agent.run_deep_agent("research", "thread-a", agent=agent)
 
     assert result == "Done"
     assert session_reports == ["C:/sessions/thread-a"]
@@ -116,7 +130,6 @@ async def test_run_agent_reports_stream_failure_and_resets_context(
 ) -> None:
     agent = _StreamingAgent(error=RuntimeError("stream failed"))
     errors: list[tuple[str, str]] = []
-    monkeypatch.setattr(main_agent, "main_agent", agent)
     monkeypatch.setattr(
         main_agent,
         "_prepare_session_environment",
@@ -127,7 +140,7 @@ async def test_run_agent_reports_stream_failure_and_resets_context(
         main_agent.monitor, "_emit", lambda event, message: errors.append((event, message))
     )
 
-    result = await main_agent.run_deep_agent("research", "thread-a")
+    result = await main_agent.run_deep_agent("research", "thread-a", agent=agent)
 
     assert result == "Error: stream failed"
     assert errors == [("error", "Exception failed: stream failed")]
@@ -149,7 +162,7 @@ async def test_run_agent_converts_environment_preparation_failure(
         main_agent.monitor, "_emit", lambda _event, message: errors.append(message)
     )
 
-    result = await main_agent.run_deep_agent("research", "bad")
+    result = await main_agent.run_deep_agent("research", "bad", agent=None)
 
     assert result == "Error: invalid workspace"
     assert errors == ["Exception failed: invalid workspace"]
@@ -162,7 +175,6 @@ async def test_run_agent_accepts_stream_without_final_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     agent = _StreamingAgent([{"tools": {"messages": []}}])
-    monkeypatch.setattr(main_agent, "main_agent", agent)
     monkeypatch.setattr(
         main_agent,
         "_prepare_session_environment",
@@ -170,4 +182,6 @@ async def test_run_agent_accepts_stream_without_final_message(
     )
     monkeypatch.setattr(main_agent.monitor, "report_session_dir", lambda _path: None)
 
-    assert await main_agent.run_deep_agent("research", "thread-a") == "Done"
+    assert await main_agent.run_deep_agent(
+        "research", "thread-a", agent=agent
+    ) == "Done"
