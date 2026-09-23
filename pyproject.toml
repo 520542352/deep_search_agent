@@ -60,6 +60,7 @@ addopts = [
     "--cov=tools",
     "--cov=utils",
     "--cov=evals",
+    "--cov=persistence",
     "--cov-branch",
     "--cov-report=term-missing",
     "--cov-fail-under=85",

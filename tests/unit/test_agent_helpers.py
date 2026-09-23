@@ -112,7 +112,7 @@ async def test_run_agent_builds_request_consumes_stream_and_resets_context(
 
     result = await main_agent.run_deep_agent("research", "thread-a", agent=agent)
 
-    assert result == "Done"
+    assert result == "final answer"
     assert session_reports == ["C:/sessions/thread-a"]
     assert result_reports == ["final answer"]
     inputs, config = agent.calls[0]
@@ -140,9 +140,9 @@ async def test_run_agent_reports_stream_failure_and_resets_context(
         main_agent.monitor, "_emit", lambda event, message: errors.append((event, message))
     )
 
-    result = await main_agent.run_deep_agent("research", "thread-a", agent=agent)
+    with pytest.raises(RuntimeError, match="stream failed"):
+        await main_agent.run_deep_agent("research", "thread-a", agent=agent)
 
-    assert result == "Error: stream failed"
     assert errors == [("error", "Exception failed: stream failed")]
     assert get_session_context() is None
     assert get_thread_context() is None
@@ -162,9 +162,9 @@ async def test_run_agent_converts_environment_preparation_failure(
         main_agent.monitor, "_emit", lambda _event, message: errors.append(message)
     )
 
-    result = await main_agent.run_deep_agent("research", "bad", agent=None)
+    with pytest.raises(ValueError, match="invalid workspace"):
+        await main_agent.run_deep_agent("research", "bad", agent=None)
 
-    assert result == "Error: invalid workspace"
     assert errors == ["Exception failed: invalid workspace"]
     assert get_session_context() is None
     assert get_thread_context() is None
@@ -184,4 +184,4 @@ async def test_run_agent_accepts_stream_without_final_message(
 
     assert await main_agent.run_deep_agent(
         "research", "thread-a", agent=agent
-    ) == "Done"
+    ) == ""

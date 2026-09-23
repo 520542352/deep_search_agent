@@ -6,14 +6,16 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from typing import List
 import shutil
 from loguru import logger
 
 from utils.path_utils import validate_thread_id
 from persistence.database import Database, resolve_database_path
+from persistence.repositories import ActiveRunConflictError, ConversationRepository
 from agent.runtime import AgentRuntime, resolve_checkpoint_path
+from agent.runner import AgentRunner
+from api.schemas import TaskRequest, TaskResponse
 
 # 配置项目路径到环境变量
 project_root = Path(__file__).resolve().parents[1]
@@ -38,8 +40,16 @@ async def lifespan(app: FastAPI):
     await database.connect()
     try:
         await agent_runtime.start()
+        conversation_repository = ConversationRepository(database)
+        agent_runner = AgentRunner(
+            conversation_repository,
+            agent=agent_runtime.agent,
+            execute=run_deep_agent,
+        )
         app.state.database = database
         app.state.agent_runtime = agent_runtime
+        app.state.conversation_repository = conversation_repository
+        app.state.agent_runner = agent_runner
         yield
     finally:
         await agent_runtime.close()
@@ -65,11 +75,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class TaskRequest(BaseModel):
-    query: str
-    thread_id: str | None = None
-
-
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -85,7 +90,7 @@ def _handle_background_task(task: asyncio.Task) -> None:
 
 
 # 开启任务接口实现
-@app.post("/api/task")
+@app.post("/api/task", response_model=TaskResponse)
 async def run_task(request: TaskRequest):
     """
     智能体任务启动接口 (Run Agent Task)。
@@ -108,24 +113,36 @@ async def run_task(request: TaskRequest):
 
     # 1. ID 初始化
     thread_id = request.thread_id or str(uuid.uuid4())
+    request_id = request.request_id or str(uuid.uuid4())
     try:
         validate_thread_id(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # 2. 后台异步执行 Agent
-    task = asyncio.create_task(
-        run_deep_agent(
-            request.query,
-            thread_id,
-            agent=app.state.agent_runtime.agent,
+    try:
+        submission = await app.state.conversation_repository.submit(
+            thread_id=thread_id,
+            query=request.query,
+            request_id=request_id,
         )
-    )
-    _background_tasks.add(task)
-    task.add_done_callback(_handle_background_task)
-    # result = await run_deep_agent(request.query, thread_id)
+    except ActiveRunConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="该会话已有正在执行的任务",
+        ) from error
 
-    return {"status":"started", "thread_id":thread_id}
+    if submission.created:
+        task = asyncio.create_task(app.state.agent_runner.run(submission.run.id))
+        _background_tasks.add(task)
+        task.add_done_callback(_handle_background_task)
+
+    return TaskResponse(
+        status="started",
+        thread_id=thread_id,
+        run_id=submission.run.id,
+        request_id=request_id,
+        deduplicated=not submission.created,
+    )
 
 
 # 上传文件接口

@@ -58,6 +58,7 @@ project_root_path = Path(__file__).parents[1].resolve()
 async def run_deep_agent(task_query: str, thread_id: str = None, *, agent):
     session_token = None
     thread_token = None
+    final_result = ""
     try:
         # 1.[准备环境] 创建目录、处理上传文件
         session_dir_str, relative_session_dir, upload_info = _prepare_session_environment(thread_id)
@@ -87,14 +88,16 @@ async def run_deep_agent(task_query: str, thread_id: str = None, *, agent):
                 {"messages":[{"role":"user", "content":task_query + path_instruction}]},
                 config=config
         ):
-            _process_stream_chunk(chunk)
-        return "Done"
+            chunk_result = _process_stream_chunk(chunk)
+            if chunk_result is not None:
+                final_result = chunk_result
+        return final_result
 
     except Exception as e:
         # 7. 异常处理
         logger.error(f"Error:{e}")
         monitor._emit("error", f"Exception failed: {str(e)}")
-        return f"Error: {e}"
+        raise
 
     finally:
         # 7. [资源处理] 必须重置ContextVars，防止线程池复用导致上下文污染
@@ -147,6 +150,7 @@ def _prepare_session_environment(thread_id: str):
 
 # 辅助函数：_process_stream_chunk 用于处理Langraph输出的增量状态
 def _process_stream_chunk(chunk):
+    final_result = None
     # 1.解析每个节点的输出
     for node_name, state in chunk.items():
         if not state or "messages" not in state: continue
@@ -168,5 +172,7 @@ def _process_stream_chunk(chunk):
                 # Case2:Agent生成最终回复结果
                 elif last_msg.content:
                     monitor.report_task_result(last_msg.content)
+                    final_result = str(last_msg.content)
+    return final_result
 
 

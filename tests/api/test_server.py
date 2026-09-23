@@ -32,10 +32,15 @@ def test_application_lifespan_initializes_and_closes_database(
     with TestClient(server.app):
         database = server.app.state.database
         agent_runtime = server.app.state.agent_runtime
+        repository = server.app.state.conversation_repository
+        agent_runner = server.app.state.agent_runner
         assert database.path == database_path
         assert database.is_connected is True
         assert agent_runtime.path == checkpoint_path
         assert agent_runtime.is_started is True
+        assert repository.database is database
+        assert agent_runner.repository is repository
+        assert agent_runner.agent is agent_runtime.agent
         assert checkpoint_path.is_file()
 
     assert database.is_connected is False
@@ -55,8 +60,115 @@ def test_task_rejects_invalid_thread_id(client: TestClient) -> None:
 @pytest.mark.api
 def test_task_schedules_agent(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     run_agent = AsyncMock()
-    monkeypatch.setattr(server, "run_deep_agent", run_agent)
+    client.app.state.agent_runner.run = run_agent
 
+    class _Task:
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def exception(self):
+            return None
+
+    def close_coroutine(coroutine):
+        coroutine.close()
+        return _Task()
+
+    monkeypatch.setattr(server.asyncio, "create_task", close_coroutine)
+
+    response = client.post(
+        "/api/task",
+        json={
+            "query": "research",
+            "thread_id": "thread-a",
+            "request_id": "request-a",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "status": "started",
+        "thread_id": "thread-a",
+        "run_id": body["run_id"],
+        "request_id": "request-a",
+        "deduplicated": False,
+    }
+    run_agent.assert_called_once_with(body["run_id"])
+    assert not server._background_tasks
+
+
+@pytest.mark.api
+def test_task_persists_original_query_and_deduplicates_request(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled: list[object] = []
+
+    class _Task:
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def exception(self):
+            return None
+
+    def close_coroutine(coroutine):
+        scheduled.append(coroutine)
+        coroutine.close()
+        return _Task()
+
+    monkeypatch.setattr(server.asyncio, "create_task", close_coroutine)
+
+    payload = {
+        "query": "original question",
+        "thread_id": "thread-a",
+        "request_id": "request-a",
+    }
+    first = client.post("/api/task", json=payload)
+    duplicate = client.post("/api/task", json=payload)
+
+    assert first.status_code == 200
+    assert duplicate.status_code == 200
+    assert duplicate.json()["run_id"] == first.json()["run_id"]
+    assert duplicate.json()["deduplicated"] is True
+    assert len(scheduled) == 1
+
+
+@pytest.mark.api
+def test_task_rejects_second_active_run_for_thread(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Task:
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def exception(self):
+            return None
+
+    def close_coroutine(coroutine):
+        coroutine.close()
+        return _Task()
+
+    monkeypatch.setattr(server.asyncio, "create_task", close_coroutine)
+    first = client.post(
+        "/api/task",
+        json={"query": "first", "thread_id": "thread-a", "request_id": "request-a"},
+    )
+    conflict = client.post(
+        "/api/task",
+        json={"query": "second", "thread_id": "thread-a", "request_id": "request-b"},
+    )
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "该会话已有正在执行的任务"
+
+
+@pytest.mark.api
+def test_task_generates_request_id_when_omitted(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _Task:
         def add_done_callback(self, callback):
             callback(self)
@@ -75,13 +187,7 @@ def test_task_schedules_agent(client: TestClient, monkeypatch: pytest.MonkeyPatc
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "started", "thread_id": "thread-a"}
-    run_agent.assert_called_once_with(
-        "research",
-        "thread-a",
-        agent=server.app.state.agent_runtime.agent,
-    )
-    assert not server._background_tasks
+    assert response.json()["request_id"]
 
 
 @pytest.mark.api
