@@ -214,9 +214,17 @@ npm run dev
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/task` | 提交研究问题，持久化任务并返回 `thread_id`、`run_id`、`request_id` |
-| `POST` | `/api/upload` | 将多个文件上传到指定会话 |
-| `GET` | `/api/files` | 获取当前会话的生成文件列表 |
-| `GET` | `/api/download` | 下载 `output` 目录中的生成文件 |
+| `POST` | `/api/upload` | 将多个文件上传到指定会话并登记持久化元数据 |
+| `GET` | `/api/threads` | 查询持久化会话列表 |
+| `GET` | `/api/threads/{thread_id}` | 查询单个会话 |
+| `GET` | `/api/threads/{thread_id}/messages` | 查询会话消息历史 |
+| `GET` | `/api/threads/{thread_id}/runs` | 查询会话运行历史 |
+| `GET` | `/api/runs/{run_id}` | 查询单次运行状态与错误信息 |
+| `GET` | `/api/threads/{thread_id}/events` | 查询持久化事件；支持 `after_event_id` 游标 |
+| `GET` | `/api/threads/{thread_id}/artifacts` | 查询上传与生成产物元数据，不暴露服务器路径 |
+| `GET` | `/api/artifacts/{artifact_id}/download` | 通过持久化产物 ID 安全下载文件 |
+| `GET` | `/api/files` | 旧版路径式文件列表接口（已弃用） |
+| `GET` | `/api/download` | 旧版路径式下载接口（已弃用） |
 | `WS` | `/ws/{thread_id}` | 接收实时事件；可通过 `after_event_id` 重放断线期间事件 |
 
 启动任务示例：
@@ -253,6 +261,7 @@ at-least-once 语义，重放与实时推送并发时可能收到重复事件，
 - [x] 引入 LangGraph SQLite Checkpointer，持久化会话状态
 - [x] 持久化会话消息与 run 生命周期，支持请求幂等和同线程并发保护
 - [x] 持久化 WebSocket 事件并支持断线重放和同会话多连接广播
+- [x] 提供会话历史查询、产物元数据和基于产物 ID 的安全下载接口
 - [ ] 为搜索结果增加可信度评分与引用溯源
 - [ ] 增加 Agent 调用链路、Token 成本和任务耗时指标
 

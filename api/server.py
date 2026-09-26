@@ -3,7 +3,16 @@ import uuid
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
@@ -12,11 +21,24 @@ from loguru import logger
 
 from utils.path_utils import validate_thread_id
 from persistence.database import Database, resolve_database_path
+from persistence.artifacts import ArtifactRepository, ArtifactService
 from persistence.events import EventRepository
-from persistence.repositories import ActiveRunConflictError, ConversationRepository
+from persistence.repositories import (
+    ActiveRunConflictError,
+    ConversationRepository,
+    RecordNotFoundError,
+)
 from agent.runtime import AgentRuntime, resolve_checkpoint_path
 from agent.runner import AgentRunner
-from api.schemas import TaskRequest, TaskResponse
+from api.schemas import (
+    ArtifactResponse,
+    EventResponse,
+    MessageResponse,
+    RunResponse,
+    TaskRequest,
+    TaskResponse,
+    ThreadResponse,
+)
 from api.events import EventPublisher
 
 # 配置项目路径到环境变量
@@ -45,10 +67,17 @@ async def lifespan(app: FastAPI):
         conversation_repository = ConversationRepository(database)
         event_repository = EventRepository(database)
         event_publisher = EventPublisher(event_repository, manager)
+        artifact_repository = ArtifactRepository(database)
+        artifact_service = ArtifactService(
+            artifact_repository,
+            upload_root=upload_dir,
+            output_root=output_dir,
+        )
         agent_runner = AgentRunner(
             conversation_repository,
             agent=agent_runtime.agent,
             execute=run_deep_agent,
+            artifact_service=artifact_service,
         )
         app.state.database = database
         app.state.agent_runtime = agent_runtime
@@ -56,6 +85,8 @@ async def lifespan(app: FastAPI):
         app.state.agent_runner = agent_runner
         app.state.event_repository = event_repository
         app.state.event_publisher = event_publisher
+        app.state.artifact_repository = artifact_repository
+        app.state.artifact_service = artifact_service
         manager.loop = asyncio.get_running_loop()
         monitor.set_event_publisher(event_publisher, manager.loop)
         yield
@@ -195,26 +226,133 @@ async def upload_files(files: List[UploadFile] = File(...),thread_id: str = Form
     saved_files = []
     for file, safe_filename in validated_files:
         file_path = target_dir / safe_filename
+        staging_dir = upload_dir / ".staging"
+        staging_dir.mkdir(exist_ok=True)
+        operation_id = uuid.uuid4().hex
+        staged_path = staging_dir / f"{thread_id}-{operation_id}.upload"
+        backup_path = staging_dir / f"{thread_id}-{operation_id}.backup"
         # 使用二进制模式写入
         # shutil.copyfileobj 高效复制文件流，避免一次性加载大文件到内存
         try:
-            with file_path.open("wb") as buffer:
+            with staged_path.open("wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
         except OSError as exc:
             try:
-                file_path.unlink(missing_ok=True)
+                staged_path.unlink(missing_ok=True)
             except OSError as cleanup_error:
                 logger.warning(f"清理未完成的上传文件失败: {cleanup_error}")
             logger.error(f"保存上传文件失败: {exc}")
             raise HTTPException(status_code=500, detail="保存上传文件失败") from exc
+        had_existing_file = file_path.is_file()
+        try:
+            if had_existing_file:
+                file_path.replace(backup_path)
+            staged_path.replace(file_path)
+            await app.state.artifact_service.register_upload(
+                thread_id,
+                file_path,
+                media_type=file.content_type,
+            )
+        except Exception as exc:
+            try:
+                file_path.unlink(missing_ok=True)
+                if had_existing_file:
+                    backup_path.replace(file_path)
+                staged_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                logger.error(f"回滚上传文件失败: {cleanup_error}")
+            logger.error(f"登记上传文件失败: {exc}")
+            raise HTTPException(status_code=500, detail="登记上传文件失败") from exc
+        try:
+            backup_path.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            logger.warning(f"清理上传备份文件失败: {cleanup_error}")
         saved_files.append(safe_filename)
 
     # 3.返回成功保存的文件列表
     return {"status": "uploaded", "files": saved_files}
 
 
+async def _require_thread(thread_id: str):
+    try:
+        validate_thread_id(thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        return await app.state.conversation_repository.get_thread(thread_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="会话不存在") from exc
+
+
+@app.get("/api/threads", response_model=list[ThreadResponse])
+async def list_threads():
+    return await app.state.conversation_repository.list_threads()
+
+
+@app.get("/api/threads/{thread_id}", response_model=ThreadResponse)
+async def get_thread(thread_id: str):
+    return await _require_thread(thread_id)
+
+
+@app.get("/api/threads/{thread_id}/messages", response_model=list[MessageResponse])
+async def list_thread_messages(thread_id: str):
+    await _require_thread(thread_id)
+    return await app.state.conversation_repository.list_messages(thread_id)
+
+
+@app.get("/api/threads/{thread_id}/runs", response_model=list[RunResponse])
+async def list_thread_runs(thread_id: str):
+    await _require_thread(thread_id)
+    return await app.state.conversation_repository.list_runs(thread_id)
+
+
+@app.get("/api/runs/{run_id}", response_model=RunResponse)
+async def get_run(run_id: str):
+    try:
+        return await app.state.conversation_repository.get_run(run_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+
+
+@app.get("/api/threads/{thread_id}/events", response_model=list[EventResponse])
+async def list_thread_events(
+    thread_id: str,
+    after_event_id: int = Query(default=0, ge=0),
+):
+    await _require_thread(thread_id)
+    return await app.state.event_repository.list_after(
+        thread_id,
+        after_event_id=after_event_id,
+    )
+
+
+@app.get("/api/threads/{thread_id}/artifacts", response_model=list[ArtifactResponse])
+async def list_thread_artifacts(thread_id: str):
+    await _require_thread(thread_id)
+    return await app.state.artifact_repository.list_for_thread(thread_id)
+
+
+@app.get("/api/artifacts/{artifact_id}/download")
+async def download_artifact(artifact_id: str):
+    try:
+        artifact = await app.state.artifact_repository.get(artifact_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="产物不存在") from exc
+    try:
+        artifact_path = app.state.artifact_service.resolve(artifact)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="产物路径无效") from exc
+    if not artifact_path.is_file():
+        raise HTTPException(status_code=404, detail="产物文件不存在")
+    return FileResponse(
+        artifact_path,
+        filename=artifact.filename,
+        media_type=artifact.media_type,
+    )
+
+
 # 下载文件接口
-@app.get("/api/download")
+@app.get("/api/download", deprecated=True)
 async def download_file(path:str):
     """
     文件下载接口
@@ -247,7 +385,7 @@ async def download_file(path:str):
 
 
 # 查询所有文件列表接口
-@app.get("/api/files")
+@app.get("/api/files", deprecated=True)
 async def list_files(path: str):
     """
     文件列表查询接口

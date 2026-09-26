@@ -4,6 +4,7 @@ import pytest
 
 from agent.runner import AgentRunner
 from api.context import get_run_context, get_thread_context
+from persistence.artifacts import ArtifactRepository, ArtifactService
 from persistence.database import Database
 from persistence.repositories import ConversationRepository
 
@@ -69,3 +70,39 @@ async def test_runner_persists_failure_and_reraises(repository) -> None:
     ]
     assert get_run_context() is None
     assert get_thread_context() is None
+
+
+@pytest.mark.unit
+async def test_runner_indexes_generated_files_before_marking_success(
+    repository,
+    tmp_path: Path,
+) -> None:
+    submission = await repository.submit("thread-a", "research", "request-a")
+    output_root = tmp_path / "output"
+    upload_root = tmp_path / "upload"
+    session_dir = output_root / "session_thread-a"
+    session_dir.mkdir(parents=True)
+    upload_root.mkdir()
+    (session_dir / "report.md").write_text("report", encoding="utf-8")
+    artifacts = ArtifactRepository(repository.database)
+    artifact_service = ArtifactService(
+        artifacts,
+        upload_root=upload_root,
+        output_root=output_root,
+    )
+
+    async def execute(query: str, thread_id: str, *, agent) -> str:
+        return "final answer"
+
+    runner = AgentRunner(
+        repository,
+        agent="fake-agent",
+        execute=execute,
+        artifact_service=artifact_service,
+    )
+    await runner.run(submission.run.id)
+
+    indexed = await artifacts.list_for_thread("thread-a")
+    assert [(item.run_id, item.kind, item.filename) for item in indexed] == [
+        (submission.run.id, "generated", "report.md")
+    ]

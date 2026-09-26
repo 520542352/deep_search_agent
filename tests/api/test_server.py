@@ -37,6 +37,8 @@ def test_application_lifespan_initializes_and_closes_database(
         agent_runner = server.app.state.agent_runner
         event_repository = server.app.state.event_repository
         event_publisher = server.app.state.event_publisher
+        artifact_repository = server.app.state.artifact_repository
+        artifact_service = server.app.state.artifact_service
         assert database.path == database_path
         assert database.is_connected is True
         assert agent_runtime.path == checkpoint_path
@@ -46,6 +48,9 @@ def test_application_lifespan_initializes_and_closes_database(
         assert agent_runner.agent is agent_runtime.agent
         assert event_repository.database is database
         assert event_publisher.repository is event_repository
+        assert artifact_repository.database is database
+        assert artifact_service.repository is artifact_repository
+        assert agent_runner.artifact_service is artifact_service
         assert checkpoint_path.is_file()
 
     assert database.is_connected is False
@@ -319,6 +324,37 @@ def test_upload_removes_partial_file_after_write_failure(
 
 
 @pytest.mark.api
+def test_upload_restores_existing_file_when_metadata_registration_fails(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = client.post(
+        "/api/upload",
+        data={"thread_id": "thread-a"},
+        files={"files": ("note.txt", b"original", "text/plain")},
+    )
+    assert first.status_code == 200
+    monkeypatch.setattr(
+        client.app.state.artifact_service,
+        "register_upload",
+        AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+
+    failed = client.post(
+        "/api/upload",
+        data={"thread_id": "thread-a"},
+        files={"files": ("note.txt", b"replacement", "text/plain")},
+    )
+
+    assert failed.status_code == 500
+    assert failed.json()["detail"] == "登记上传文件失败"
+    assert (
+        tmp_path / "upload" / "session_thread-a" / "note.txt"
+    ).read_bytes() == b"original"
+
+
+@pytest.mark.api
 def test_list_and_download_files_are_confined_to_output(
     client: TestClient, tmp_path: Path
 ) -> None:
@@ -360,6 +396,113 @@ def test_file_endpoints_validate_required_and_missing_paths(
     assert download.json()["detail"] == "文件不存在"
     assert listing.status_code == 404
     assert listing.json()["detail"] == "目录不存在"
+
+
+@pytest.mark.api
+def test_history_endpoints_return_persisted_records_without_server_paths(
+    client: TestClient,
+) -> None:
+    conversations = client.app.state.conversation_repository
+    events = client.app.state.event_repository
+    submission = client.portal.call(
+        conversations.submit,
+        "thread-a",
+        "research",
+        "request-a",
+    )
+    client.portal.call(conversations.mark_running, submission.run.id)
+    client.portal.call(
+        conversations.mark_succeeded,
+        submission.run.id,
+        "final answer",
+    )
+    client.portal.call(
+        partial(
+            events.append,
+            "thread-a",
+            "tool_end",
+            "finished",
+            run_id=submission.run.id,
+            data={"tool_name": "search"},
+        )
+    )
+    upload = client.post(
+        "/api/upload",
+        data={"thread_id": "thread-a"},
+        files={"files": ("note.txt", b"hello", "text/plain")},
+    )
+    assert upload.status_code == 200
+
+    threads = client.get("/api/threads")
+    thread = client.get("/api/threads/thread-a")
+    messages = client.get("/api/threads/thread-a/messages")
+    runs = client.get("/api/threads/thread-a/runs")
+    run = client.get(f"/api/runs/{submission.run.id}")
+    persisted_events = client.get("/api/threads/thread-a/events")
+    artifacts = client.get("/api/threads/thread-a/artifacts")
+
+    assert threads.status_code == 200
+    assert [item["id"] for item in threads.json()] == ["thread-a"]
+    assert thread.json()["status"] == "active"
+    assert [(item["role"], item["content"]) for item in messages.json()] == [
+        ("user", "research"),
+        ("assistant", "final answer"),
+    ]
+    assert [item["id"] for item in runs.json()] == [submission.run.id]
+    assert run.json()["status"] == "succeeded"
+    assert persisted_events.json()[0]["event_type"] == "tool_end"
+    assert persisted_events.json()[0]["data"] == {"tool_name": "search"}
+    assert artifacts.json()[0]["filename"] == "note.txt"
+    assert artifacts.json()[0]["kind"] == "upload"
+    assert "relative_path" not in artifacts.json()[0]
+    assert str(server.upload_dir) not in str(artifacts.json())
+
+
+@pytest.mark.api
+def test_artifact_download_uses_persisted_id(client: TestClient) -> None:
+    uploaded = client.post(
+        "/api/upload",
+        data={"thread_id": "thread-a"},
+        files={"files": ("note.txt", b"hello", "text/plain")},
+    )
+    assert uploaded.status_code == 200
+    artifact = client.get("/api/threads/thread-a/artifacts").json()[0]
+
+    downloaded = client.get(f"/api/artifacts/{artifact['id']}/download")
+
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"hello"
+    assert 'filename="note.txt"' in downloaded.headers["content-disposition"]
+
+
+@pytest.mark.api
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/threads/missing",
+        "/api/threads/missing/messages",
+        "/api/threads/missing/runs",
+        "/api/threads/missing/events",
+        "/api/threads/missing/artifacts",
+        "/api/runs/missing",
+        "/api/artifacts/missing/download",
+    ],
+)
+def test_history_endpoints_return_404_for_missing_records(
+    client: TestClient,
+    path: str,
+) -> None:
+    response = client.get(path)
+
+    assert response.status_code == 404
+
+
+@pytest.mark.api
+def test_legacy_path_endpoints_are_marked_deprecated(client: TestClient) -> None:
+    schema = client.get("/openapi.json").json()
+
+    assert schema["paths"]["/api/files"]["get"]["deprecated"] is True
+    assert schema["paths"]["/api/download"]["get"]["deprecated"] is True
 
 
 @pytest.mark.api

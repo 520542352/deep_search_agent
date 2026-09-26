@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from persistence.database import Database
-from persistence.repositories import ActiveRunConflictError, ConversationRepository
+from persistence.repositories import (
+    ActiveRunConflictError,
+    ConversationRepository,
+    RecordNotFoundError,
+)
 
 
 @pytest.fixture
@@ -85,3 +89,24 @@ async def test_concurrent_submissions_leave_one_active_run_per_thread(
     assert sum(not isinstance(result, Exception) for result in results) == 1
     assert sum(isinstance(result, ActiveRunConflictError) for result in results) == 1
     assert len(await repository.list_runs("thread-a")) == 1
+
+
+@pytest.mark.unit
+async def test_threads_can_be_listed_and_loaded(repository) -> None:
+    await repository.submit("thread-a", "first", "request-a")
+    await repository.submit("thread-b", "second", "request-b")
+
+    threads = await repository.list_threads()
+    loaded = await repository.get_thread("thread-a")
+
+    assert {thread.id for thread in threads} == {"thread-a", "thread-b"}
+    assert loaded.id == "thread-a"
+    assert loaded.status == "active"
+    assert loaded.created_at
+    assert loaded.updated_at
+
+
+@pytest.mark.unit
+async def test_loading_missing_thread_raises_not_found(repository) -> None:
+    with pytest.raises(RecordNotFoundError, match="thread not found"):
+        await repository.get_thread("missing")

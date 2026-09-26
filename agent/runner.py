@@ -18,10 +18,12 @@ class AgentRunner:
         *,
         agent: Any,
         execute: Callable[..., Awaitable[str]],
+        artifact_service=None,
     ) -> None:
         self.repository = repository
         self.agent = agent
         self.execute = execute
+        self.artifact_service = artifact_service
 
     async def run(self, run_id: str) -> None:
         run = await self.repository.mark_running(run_id)
@@ -33,6 +35,8 @@ class AgentRunner:
                 run.thread_id,
                 agent=self.agent,
             )
+            if self.artifact_service is not None:
+                await self.artifact_service.index_generated(run.thread_id, run.id)
         except Exception as error:
             await self.repository.mark_failed(run_id, error)
             raise

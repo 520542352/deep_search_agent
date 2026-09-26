@@ -26,6 +26,15 @@ class InvalidRunTransitionError(PersistenceConflictError):
 
 
 @dataclass(frozen=True)
+class ThreadRecord:
+    id: str
+    title: str | None
+    status: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class RunRecord:
     id: str
     thread_id: str
@@ -61,6 +70,10 @@ def _run_from_row(row: sqlite3.Row) -> RunRecord:
     return RunRecord(**dict(row))
 
 
+def _thread_from_row(row: sqlite3.Row) -> ThreadRecord:
+    return ThreadRecord(**dict(row))
+
+
 def _message_from_row(row: sqlite3.Row) -> MessageRecord:
     return MessageRecord(**dict(row))
 
@@ -70,6 +83,25 @@ class ConversationRepository:
 
     def __init__(self, database: Database):
         self.database = database
+
+    async def get_thread(self, thread_id: str) -> ThreadRecord:
+        row = await (
+            await self.database.connection.execute(
+                "SELECT * FROM threads WHERE id = ?",
+                (thread_id,),
+            )
+        ).fetchone()
+        if row is None:
+            raise RecordNotFoundError(f"thread not found: {thread_id}")
+        return _thread_from_row(row)
+
+    async def list_threads(self) -> list[ThreadRecord]:
+        rows = await (
+            await self.database.connection.execute(
+                "SELECT * FROM threads ORDER BY updated_at DESC, id"
+            )
+        ).fetchall()
+        return [_thread_from_row(row) for row in rows]
 
     async def submit(
         self,
