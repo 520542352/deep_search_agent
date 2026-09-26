@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from agent.runner import AgentRunner
+from api.context import get_run_context, get_thread_context
 from persistence.database import Database
 from persistence.repositories import ConversationRepository
 
@@ -23,6 +24,8 @@ async def test_runner_persists_success_and_assistant_message(repository) -> None
 
     async def execute(query: str, thread_id: str, *, agent) -> str:
         assert (query, thread_id, agent) == ("research", "thread-a", "fake-agent")
+        assert get_run_context() == submission.run.id
+        assert get_thread_context() == "thread-a"
         running = await repository.get_run(submission.run.id)
         assert running.status == "running"
         return "final answer"
@@ -39,6 +42,8 @@ async def test_runner_persists_success_and_assistant_message(repository) -> None
         ("user", "research"),
         ("assistant", "final answer"),
     ]
+    assert get_run_context() is None
+    assert get_thread_context() is None
 
 
 @pytest.mark.unit
@@ -62,3 +67,5 @@ async def test_runner_persists_failure_and_reraises(repository) -> None:
     assert [(message.role, message.content) for message in await repository.list_messages("thread-a")] == [
         ("user", "research")
     ]
+    assert get_run_context() is None
+    assert get_thread_context() is None

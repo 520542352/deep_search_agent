@@ -162,6 +162,44 @@ async def test_two_database_connections_can_write_without_lock_errors(
 
 
 @pytest.mark.unit
+async def test_write_transactions_are_serialized_on_one_connection(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "application.db")
+    await database.connect()
+    if not hasattr(database, "write_transaction"):
+        await database.close()
+        pytest.fail("Database.write_transaction has not been implemented")
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    order: list[str] = []
+
+    async def first_writer() -> None:
+        async with database.write_transaction():
+            order.append("first-start")
+            first_entered.set()
+            await release_first.wait()
+            order.append("first-end")
+
+    async def second_writer() -> None:
+        await first_entered.wait()
+        async with database.write_transaction():
+            order.append("second")
+
+    try:
+        first = asyncio.create_task(first_writer())
+        second = asyncio.create_task(second_writer())
+        await first_entered.wait()
+        await asyncio.sleep(0)
+        assert order == ["first-start"]
+        release_first.set()
+        await asyncio.gather(first, second)
+        assert order == ["first-start", "first-end", "second"]
+    finally:
+        await database.close()
+
+
+@pytest.mark.unit
 def test_database_rejects_connection_access_before_connect(tmp_path: Path) -> None:
     database = Database(tmp_path / "application.db")
 

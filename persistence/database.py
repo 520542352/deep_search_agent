@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import sqlite3
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
@@ -49,6 +51,7 @@ class Database:
         self.migrations_dir = Path(migrations_dir)
         self.busy_timeout_ms = busy_timeout_ms
         self._connection: aiosqlite.Connection | None = None
+        self._write_lock = asyncio.Lock()
 
     @property
     def is_connected(self) -> bool:
@@ -83,6 +86,20 @@ class Database:
         connection = self._connection
         self._connection = None
         await connection.close()
+
+    @asynccontextmanager
+    async def write_transaction(self):
+        """Serialize writes that share this SQLite connection."""
+        async with self._write_lock:
+            connection = self.connection
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+            except BaseException:
+                await connection.rollback()
+                raise
+            else:
+                await connection.commit()
 
     async def _configure_connection(self) -> None:
         await self.connection.execute("PRAGMA foreign_keys = ON")

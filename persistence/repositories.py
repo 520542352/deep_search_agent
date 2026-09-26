@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -71,7 +70,6 @@ class ConversationRepository:
 
     def __init__(self, database: Database):
         self.database = database
-        self._write_lock = asyncio.Lock()
 
     async def submit(
         self,
@@ -79,18 +77,7 @@ class ConversationRepository:
         query: str,
         request_id: str,
     ) -> SubmissionResult:
-        async with self._write_lock:
-            return await self._submit_locked(thread_id, query, request_id)
-
-    async def _submit_locked(
-        self,
-        thread_id: str,
-        query: str,
-        request_id: str,
-    ) -> SubmissionResult:
-        connection = self.database.connection
-        await connection.execute("BEGIN IMMEDIATE")
-        try:
+        async with self.database.write_transaction() as connection:
             existing = await (
                 await connection.execute(
                     "SELECT * FROM runs WHERE thread_id = ? AND request_id = ?",
@@ -98,7 +85,6 @@ class ConversationRepository:
                 )
             ).fetchone()
             if existing is not None:
-                await connection.commit()
                 return SubmissionResult(_run_from_row(existing), created=False)
 
             active = await (
@@ -137,10 +123,6 @@ class ConversationRepository:
                 role="user",
                 content=query,
             )
-            await connection.commit()
-        except Exception:
-            await connection.rollback()
-            raise
         return SubmissionResult(await self.get_run(run_id), created=True)
 
     async def get_run(self, run_id: str) -> RunRecord:
@@ -173,8 +155,8 @@ class ConversationRepository:
         return [_message_from_row(row) for row in rows]
 
     async def mark_running(self, run_id: str) -> RunRecord:
-        async with self._write_lock:
-            cursor = await self.database.connection.execute(
+        async with self.database.write_transaction() as connection:
+            cursor = await connection.execute(
                 """
                 UPDATE runs
                 SET status = 'running',
@@ -184,24 +166,11 @@ class ConversationRepository:
                 (run_id,),
             )
             if cursor.rowcount != 1:
-                await self.database.connection.rollback()
                 raise InvalidRunTransitionError(f"run {run_id!r} is not queued")
-            await self.database.connection.commit()
         return await self.get_run(run_id)
 
     async def mark_succeeded(self, run_id: str, assistant_message: str) -> RunRecord:
-        async with self._write_lock:
-            await self._mark_succeeded_locked(run_id, assistant_message)
-        return await self.get_run(run_id)
-
-    async def _mark_succeeded_locked(
-        self,
-        run_id: str,
-        assistant_message: str,
-    ) -> None:
-        connection = self.database.connection
-        await connection.execute("BEGIN IMMEDIATE")
-        try:
+        async with self.database.write_transaction() as connection:
             run = await self.get_run(run_id)
             if run.status != "running":
                 raise InvalidRunTransitionError(f"run {run_id!r} is not running")
@@ -221,14 +190,11 @@ class ConversationRepository:
                 """,
                 (run_id,),
             )
-            await connection.commit()
-        except Exception:
-            await connection.rollback()
-            raise
+        return await self.get_run(run_id)
 
     async def mark_failed(self, run_id: str, error: Exception) -> RunRecord:
-        async with self._write_lock:
-            cursor = await self.database.connection.execute(
+        async with self.database.write_transaction() as connection:
+            cursor = await connection.execute(
                 """
                 UPDATE runs
                 SET status = 'failed',
@@ -240,9 +206,7 @@ class ConversationRepository:
                 (type(error).__name__, str(error), run_id),
             )
             if cursor.rowcount != 1:
-                await self.database.connection.rollback()
                 raise InvalidRunTransitionError(f"run {run_id!r} is not running")
-            await self.database.connection.commit()
         return await self.get_run(run_id)
 
     async def _append_message(

@@ -1,4 +1,5 @@
 from pathlib import Path
+from functools import partial
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -34,6 +35,8 @@ def test_application_lifespan_initializes_and_closes_database(
         agent_runtime = server.app.state.agent_runtime
         repository = server.app.state.conversation_repository
         agent_runner = server.app.state.agent_runner
+        event_repository = server.app.state.event_repository
+        event_publisher = server.app.state.event_publisher
         assert database.path == database_path
         assert database.is_connected is True
         assert agent_runtime.path == checkpoint_path
@@ -41,6 +44,8 @@ def test_application_lifespan_initializes_and_closes_database(
         assert repository.database is database
         assert agent_runner.repository is repository
         assert agent_runner.agent is agent_runtime.agent
+        assert event_repository.database is database
+        assert event_publisher.repository is event_repository
         assert checkpoint_path.is_file()
 
     assert database.is_connected is False
@@ -366,6 +371,44 @@ def test_websocket_replies_to_ping(client: TestClient) -> None:
             "message": "服务端已收到：ping",
         }
     assert "thread-a" not in server.manager.active_connections
+
+
+@pytest.mark.api
+def test_websocket_replays_events_after_cursor(client: TestClient) -> None:
+    conversations = client.app.state.conversation_repository
+    events = client.app.state.event_repository
+    submission = client.portal.call(
+        conversations.submit,
+        "thread-a",
+        "research",
+        "request-a",
+    )
+    first = client.portal.call(
+        partial(
+            events.append,
+            "thread-a",
+            "session_created",
+            "created",
+            run_id=submission.run.id,
+        )
+    )
+    second = client.portal.call(
+        partial(
+            events.append,
+            "thread-a",
+            "tool_start",
+            "searching",
+            run_id=submission.run.id,
+            data={"tool_name": "search"},
+        )
+    )
+
+    with client.websocket_connect(
+        f"/ws/thread-a?after_event_id={first.id}"
+    ) as websocket:
+        assert websocket.receive_json() == second.to_payload()
+        websocket.send_text("ping")
+        assert websocket.receive_json()["type"] == "pong"
 
 
 @pytest.mark.api

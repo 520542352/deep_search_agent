@@ -24,7 +24,7 @@
 
 - **多智能体协作**：主 Agent 统一规划任务，按需委派网络搜索、数据库查询和 RAGFlow 知识库三类专家 Agent。
 - **多源深度研究**：同时覆盖公开网络信息、企业内部文档与 MySQL 结构化数据，支持递进式检索和交叉补充。
-- **异步任务与持久化生命周期**：FastAPI 后台执行长任务，SQLite 持久化会话、原始消息和运行状态，WebSocket 按 `thread_id` 推送实时进度。
+- **异步任务与可重放事件**：FastAPI 后台执行长任务，SQLite 持久化会话、运行状态和实时事件；WebSocket 支持按 `event_id` 断线续传。
 - **文件理解与研究交付**：支持读取 Markdown、Word、PDF 和 Excel，并将研究结果输出为 Markdown / PDF。
 - **会话级资源隔离**：使用 `ContextVar` 绑定任务目录和 WebSocket 会话，避免并发任务之间的路径与消息污染。
 - **工具层安全边界**：文件路径强制限定在当前会话目录；SQL 限制为单条只读查询，配合只读事务与结果行数上限降低风险。
@@ -66,7 +66,7 @@
 4. 主 Agent 根据问题拆解 TODO，将子任务分派给合适的专家 Agent。
 5. 专家 Agent 独立使用 Tavily、MySQL 或 RAGFlow 获取信息，结果返回主 Agent 继续迭代研究。
 6. 主 Agent 综合多源结果，直接回答用户，或按需生成 Markdown / PDF 报告。
-7. run 按 `queued → running → succeeded/failed` 更新，最终回答写入业务数据库；执行事件同时通过 WebSocket 定向推送给当前会话。
+7. run 按 `queued → running → succeeded/failed` 更新；执行事件先写入 SQLite，再通过 WebSocket 广播给当前会话的所有连接。
 
 ## 🧠 Agent 设计
 
@@ -114,6 +114,7 @@ deep-search-agent/
 ├── api/
 │   ├── server.py                     # HTTP / WebSocket API
 │   ├── schemas.py                    # API 请求与响应模型
+│   ├── events.py                     # 持久化事件发布器
 │   ├── context.py                    # 会话级 ContextVar
 │   └── monitor.py                    # 执行事件监控与推送
 ├── tools/
@@ -216,7 +217,7 @@ npm run dev
 | `POST` | `/api/upload` | 将多个文件上传到指定会话 |
 | `GET` | `/api/files` | 获取当前会话的生成文件列表 |
 | `GET` | `/api/download` | 下载 `output` 目录中的生成文件 |
-| `WS` | `/ws/{thread_id}` | 接收会话级实时执行事件 |
+| `WS` | `/ws/{thread_id}` | 接收实时事件；可通过 `after_event_id` 重放断线期间事件 |
 
 启动任务示例：
 
@@ -230,6 +231,16 @@ curl -X POST http://127.0.0.1:8000/api/task \
 `thread_id + request_id` 的重复请求返回原 `run_id`，不会再次执行。同一
 `thread_id` 同时只允许一个 `queued` 或 `running` run，冲突时返回 HTTP 409。
 
+WebSocket 事件包含稳定递增的 `event_id`。客户端重连时可使用：
+
+```text
+ws://127.0.0.1:8000/ws/{thread_id}?after_event_id=123
+```
+
+服务端会重放该会话中 ID 大于 123 的事件，再继续推送实时事件。协议采用
+at-least-once 语义，重放与实时推送并发时可能收到重复事件，客户端应按
+`event_id` 去重。
+
 ## 📊 设计取舍
 
 - **为什么使用子 Agent？** 将不同数据边界与工具集隔离，降低单 Agent 上下文混杂和工具误用风险。
@@ -241,7 +252,7 @@ curl -X POST http://127.0.0.1:8000/api/task \
 
 - [x] 引入 LangGraph SQLite Checkpointer，持久化会话状态
 - [x] 持久化会话消息与 run 生命周期，支持请求幂等和同线程并发保护
-- [ ] 持久化 WebSocket 事件并支持断线重放
+- [x] 持久化 WebSocket 事件并支持断线重放和同会话多连接广播
 - [ ] 为搜索结果增加可信度评分与引用溯源
 - [ ] 增加 Agent 调用链路、Token 成本和任务耗时指标
 

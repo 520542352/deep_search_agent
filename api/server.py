@@ -12,10 +12,12 @@ from loguru import logger
 
 from utils.path_utils import validate_thread_id
 from persistence.database import Database, resolve_database_path
+from persistence.events import EventRepository
 from persistence.repositories import ActiveRunConflictError, ConversationRepository
 from agent.runtime import AgentRuntime, resolve_checkpoint_path
 from agent.runner import AgentRunner
 from api.schemas import TaskRequest, TaskResponse
+from api.events import EventPublisher
 
 # 配置项目路径到环境变量
 project_root = Path(__file__).resolve().parents[1]
@@ -41,6 +43,8 @@ async def lifespan(app: FastAPI):
     try:
         await agent_runtime.start()
         conversation_repository = ConversationRepository(database)
+        event_repository = EventRepository(database)
+        event_publisher = EventPublisher(event_repository, manager)
         agent_runner = AgentRunner(
             conversation_repository,
             agent=agent_runtime.agent,
@@ -50,8 +54,14 @@ async def lifespan(app: FastAPI):
         app.state.agent_runtime = agent_runtime
         app.state.conversation_repository = conversation_repository
         app.state.agent_runner = agent_runner
+        app.state.event_repository = event_repository
+        app.state.event_publisher = event_publisher
+        manager.loop = asyncio.get_running_loop()
+        monitor.set_event_publisher(event_publisher, manager.loop)
         yield
     finally:
+        await monitor.drain()
+        monitor.set_event_publisher(None)
         await agent_runtime.close()
         await database.close()
 
@@ -294,7 +304,11 @@ async def list_files(path: str):
 
 # WebSocket实时通讯
 @app.websocket("/ws/{thread_id}")
-async def websocket_endpoint(websocket: WebSocket, thread_id: str):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    thread_id: str,
+    after_event_id: int = 0,
+):
     """
     WebSocket实时通讯核心接口
 
@@ -316,10 +330,20 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     except ValueError:
         await websocket.close(code=1008, reason="无效的 thread_id")
         return
+    if after_event_id < 0:
+        await websocket.close(code=1008, reason="无效的 after_event_id")
+        return
 
     # 1.建立连接并绑定到管理器
     await manager.connect(websocket, thread_id)
     try:
+        events = await app.state.event_repository.list_after(
+            thread_id,
+            after_event_id=after_event_id,
+        )
+        for event in events:
+            await websocket.send_json(event.to_payload())
+
         # 2.保持活跃连接
         while True:
             # 3.监听接收前端消息(通常是ping)
