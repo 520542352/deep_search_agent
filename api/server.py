@@ -26,6 +26,7 @@ from persistence.events import EventRepository
 from persistence.repositories import (
     ActiveRunConflictError,
     ConversationRepository,
+    InvalidRunTransitionError,
     RecordNotFoundError,
 )
 from agent.runtime import AgentRuntime, resolve_checkpoint_path
@@ -35,6 +36,7 @@ from api.schemas import (
     EventResponse,
     MessageResponse,
     RunResponse,
+    RunRecoveryResponse,
     TaskRequest,
     TaskResponse,
     ThreadResponse,
@@ -47,7 +49,7 @@ if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
 # 导入agent已经monitor
-from agent.main_agent import build_main_agent, run_deep_agent
+from agent.main_agent import build_main_agent, resume_deep_agent, run_deep_agent
 from api.monitor import monitor,manager
 
 database_path = resolve_database_path(project_root)
@@ -77,6 +79,7 @@ async def lifespan(app: FastAPI):
             conversation_repository,
             agent=agent_runtime.agent,
             execute=run_deep_agent,
+            resume_execute=resume_deep_agent,
             artifact_service=artifact_service,
         )
         app.state.database = database
@@ -89,8 +92,17 @@ async def lifespan(app: FastAPI):
         app.state.artifact_service = artifact_service
         manager.loop = asyncio.get_running_loop()
         monitor.set_event_publisher(event_publisher, manager.loop)
+        reconciliation = await conversation_repository.reconcile_startup()
+        app.state.startup_reconciliation = reconciliation
+        for run_id in reconciliation.queued_run_ids:
+            _schedule_background(agent_runner.run(run_id))
         yield
     finally:
+        active_tasks = list(_background_tasks)
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
         await monitor.drain()
         monitor.set_event_publisher(None)
         await agent_runtime.close()
@@ -130,6 +142,12 @@ def _handle_background_task(task: asyncio.Task) -> None:
         logger.error(f"Agent background task failed: {error}")
 
 
+def _schedule_background(coroutine) -> None:
+    task = asyncio.create_task(coroutine)
+    _background_tasks.add(task)
+    task.add_done_callback(_handle_background_task)
+
+
 # 开启任务接口实现
 @app.post("/api/task", response_model=TaskResponse)
 async def run_task(request: TaskRequest):
@@ -161,10 +179,14 @@ async def run_task(request: TaskRequest):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     try:
+        base_checkpoint_id = await app.state.agent_runtime.ensure_checkpoint_baseline(
+            thread_id
+        )
         submission = await app.state.conversation_repository.submit(
             thread_id=thread_id,
             query=request.query,
             request_id=request_id,
+            base_checkpoint_id=base_checkpoint_id,
         )
     except ActiveRunConflictError as error:
         raise HTTPException(
@@ -173,9 +195,7 @@ async def run_task(request: TaskRequest):
         ) from error
 
     if submission.created:
-        task = asyncio.create_task(app.state.agent_runner.run(submission.run.id))
-        _background_tasks.add(task)
-        task.add_done_callback(_handle_background_task)
+        _schedule_background(app.state.agent_runner.run(submission.run.id))
 
     return TaskResponse(
         status="started",
@@ -312,6 +332,55 @@ async def get_run(run_id: str):
         return await app.state.conversation_repository.get_run(run_id)
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+
+
+@app.post("/api/runs/{run_id}/resume", response_model=RunRecoveryResponse)
+async def resume_run(run_id: str):
+    try:
+        run = await app.state.conversation_repository.get_run(run_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+    if run.status != "interrupted":
+        raise HTTPException(status_code=409, detail="只有中断的运行可以恢复")
+    checkpoint_id = await app.state.agent_runtime.checkpoint_id_for_run(
+        run.thread_id,
+        run.id,
+    )
+    if checkpoint_id is None:
+        raise HTTPException(status_code=409, detail="该运行没有可恢复的检查点")
+    try:
+        claimed = await app.state.conversation_repository.claim_resume(run_id)
+    except (ActiveRunConflictError, InvalidRunTransitionError) as exc:
+        raise HTTPException(status_code=409, detail="该会话无法恢复当前运行") from exc
+    _schedule_background(
+        app.state.agent_runner.resume(claimed.id, checkpoint_id=checkpoint_id)
+    )
+    return RunRecoveryResponse(
+        status="resumed",
+        thread_id=claimed.thread_id,
+        run_id=claimed.id,
+        parent_run_id=claimed.parent_run_id,
+    )
+
+
+@app.post("/api/runs/{run_id}/retry", response_model=RunRecoveryResponse)
+async def retry_run(run_id: str):
+    try:
+        retry = await app.state.conversation_repository.retry_run(
+            run_id,
+            request_id=str(uuid.uuid4()),
+        )
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+    except (ActiveRunConflictError, InvalidRunTransitionError) as exc:
+        raise HTTPException(status_code=409, detail="该运行当前无法重试") from exc
+    _schedule_background(app.state.agent_runner.run(retry.id))
+    return RunRecoveryResponse(
+        status="retried",
+        thread_id=retry.thread_id,
+        run_id=retry.id,
+        parent_run_id=retry.parent_run_id,
+    )
 
 
 @app.get("/api/threads/{thread_id}/events", response_model=list[EventResponse])

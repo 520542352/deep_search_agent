@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from functools import partial
 from unittest.mock import AsyncMock, Mock
@@ -7,6 +8,8 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from api import server
+from persistence.database import Database
+from persistence.repositories import ConversationRepository
 
 
 @pytest.fixture
@@ -71,6 +74,8 @@ def test_task_rejects_invalid_thread_id(client: TestClient) -> None:
 def test_task_schedules_agent(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     run_agent = AsyncMock()
     client.app.state.agent_runner.run = run_agent
+    ensure_baseline = AsyncMock(return_value="checkpoint-before-run")
+    client.app.state.agent_runtime.ensure_checkpoint_baseline = ensure_baseline
 
     class _Task:
         def add_done_callback(self, callback):
@@ -104,6 +109,12 @@ def test_task_schedules_agent(client: TestClient, monkeypatch: pytest.MonkeyPatc
         "deduplicated": False,
     }
     run_agent.assert_called_once_with(body["run_id"])
+    persisted = client.portal.call(
+        client.app.state.conversation_repository.get_run,
+        body["run_id"],
+    )
+    assert persisted.base_checkpoint_id == "checkpoint-before-run"
+    ensure_baseline.assert_awaited_once_with("thread-a")
     assert not server._background_tasks
 
 
@@ -503,6 +514,205 @@ def test_legacy_path_endpoints_are_marked_deprecated(client: TestClient) -> None
 
     assert schema["paths"]["/api/files"]["get"]["deprecated"] is True
     assert schema["paths"]["/api/download"]["get"]["deprecated"] is True
+
+
+@pytest.mark.api
+def test_lifespan_requeues_queued_runs_and_interrupts_stale_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "data" / "application.db"
+    checkpoint_path = tmp_path / "data" / "checkpoints.db"
+
+    async def seed_runs():
+        database = Database(database_path)
+        await database.connect()
+        repository = ConversationRepository(database)
+        queued = await repository.submit("thread-queued", "queued", "request-q")
+        running = await repository.submit("thread-running", "running", "request-r")
+        await repository.mark_running(running.run.id)
+        await database.close()
+        return queued.run.id, running.run.id
+
+    queued_run_id, running_run_id = asyncio.run(seed_runs())
+    scheduled: list[str] = []
+
+    async def record_run(_runner, run_id: str) -> None:
+        scheduled.append(run_id)
+
+    monkeypatch.setattr(server, "database_path", database_path)
+    monkeypatch.setattr(server, "checkpoint_path", checkpoint_path)
+    monkeypatch.setattr(server, "output_dir", tmp_path / "output")
+    monkeypatch.setattr(server, "upload_dir", tmp_path / "upload")
+    monkeypatch.setattr(server.AgentRunner, "run", record_run)
+    server.output_dir.mkdir()
+    server.upload_dir.mkdir()
+
+    with TestClient(server.app) as test_client:
+        test_client.get("/api/threads")
+        interrupted = test_client.get(f"/api/runs/{running_run_id}").json()
+
+    assert scheduled == [queued_run_id]
+    assert interrupted["status"] == "interrupted"
+    assert interrupted["error_code"] == "ProcessInterrupted"
+
+
+@pytest.mark.api
+def test_resume_claims_interrupted_run_before_scheduling(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = client.app.state.conversation_repository
+    submission = client.portal.call(
+        repository.submit,
+        "thread-a",
+        "research",
+        "request-a",
+    )
+    client.portal.call(repository.mark_running, submission.run.id)
+    client.portal.call(repository.reconcile_startup)
+    monkeypatch.setattr(
+        client.app.state.agent_runtime,
+        "checkpoint_id_for_run",
+        AsyncMock(return_value="checkpoint-for-run"),
+    )
+    resume_agent = AsyncMock()
+    client.app.state.agent_runner.resume = resume_agent
+
+    class _Task:
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def exception(self):
+            return None
+
+    def close_coroutine(coroutine):
+        coroutine.close()
+        return _Task()
+
+    monkeypatch.setattr(server.asyncio, "create_task", close_coroutine)
+
+    resumed = client.post(f"/api/runs/{submission.run.id}/resume")
+    duplicate = client.post(f"/api/runs/{submission.run.id}/resume")
+
+    assert resumed.status_code == 200
+    assert resumed.json() == {
+        "status": "resumed",
+        "thread_id": "thread-a",
+        "run_id": submission.run.id,
+        "parent_run_id": None,
+    }
+    assert duplicate.status_code == 409
+    assert client.portal.call(repository.get_run, submission.run.id).status == "running"
+    resume_agent.assert_called_once_with(
+        submission.run.id,
+        checkpoint_id="checkpoint-for-run",
+    )
+
+
+@pytest.mark.api
+def test_resume_without_checkpoint_keeps_run_interrupted(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = client.app.state.conversation_repository
+    submission = client.portal.call(
+        repository.submit,
+        "thread-a",
+        "research",
+        "request-a",
+    )
+    client.portal.call(repository.mark_running, submission.run.id)
+    client.portal.call(repository.reconcile_startup)
+    monkeypatch.setattr(
+        client.app.state.agent_runtime,
+        "checkpoint_id_for_run",
+        AsyncMock(return_value=None),
+    )
+
+    response = client.post(f"/api/runs/{submission.run.id}/resume")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "该运行没有可恢复的检查点"
+    assert client.portal.call(repository.get_run, submission.run.id).status == "interrupted"
+
+
+@pytest.mark.api
+def test_retry_creates_and_schedules_child_run(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = client.app.state.conversation_repository
+    original = client.portal.call(
+        partial(
+            repository.submit,
+            "thread-a",
+            "research",
+            "request-a",
+            base_checkpoint_id="checkpoint-before-run",
+        )
+    )
+    client.portal.call(repository.mark_running, original.run.id)
+    client.portal.call(
+        repository.mark_failed,
+        original.run.id,
+        RuntimeError("model unavailable"),
+    )
+    run_agent = AsyncMock()
+    client.app.state.agent_runner.run = run_agent
+
+    class _Task:
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def exception(self):
+            return None
+
+    def close_coroutine(coroutine):
+        coroutine.close()
+        return _Task()
+
+    monkeypatch.setattr(server.asyncio, "create_task", close_coroutine)
+
+    response = client.post(f"/api/runs/{original.run.id}/retry")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "status": "retried",
+        "thread_id": "thread-a",
+        "run_id": body["run_id"],
+        "parent_run_id": original.run.id,
+    }
+    retry = client.portal.call(repository.get_run, body["run_id"])
+    assert retry.status == "queued"
+    assert retry.query == "research"
+    run_agent.assert_called_once_with(retry.id)
+
+
+@pytest.mark.api
+def test_recovery_endpoints_reject_missing_or_terminal_runs(
+    client: TestClient,
+) -> None:
+    missing_resume = client.post("/api/runs/missing/resume")
+    missing_retry = client.post("/api/runs/missing/retry")
+    repository = client.app.state.conversation_repository
+    submission = client.portal.call(
+        repository.submit,
+        "thread-a",
+        "research",
+        "request-a",
+    )
+    client.portal.call(repository.mark_running, submission.run.id)
+    client.portal.call(repository.mark_succeeded, submission.run.id, "done")
+
+    completed_resume = client.post(f"/api/runs/{submission.run.id}/resume")
+    completed_retry = client.post(f"/api/runs/{submission.run.id}/retry")
+
+    assert missing_resume.status_code == 404
+    assert missing_retry.status_code == 404
+    assert completed_resume.status_code == 409
+    assert completed_retry.status_code == 409
 
 
 @pytest.mark.api

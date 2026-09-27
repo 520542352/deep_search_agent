@@ -17,6 +17,13 @@ class TaskResponse(BaseModel):
     deduplicated: bool
 
 
+class RunRecoveryResponse(BaseModel):
+    status: str
+    thread_id: str
+    run_id: str
+    parent_run_id: str | None
+
+
 class PersistenceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

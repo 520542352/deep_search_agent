@@ -220,6 +220,8 @@ npm run dev
 | `GET` | `/api/threads/{thread_id}/messages` | 查询会话消息历史 |
 | `GET` | `/api/threads/{thread_id}/runs` | 查询会话运行历史 |
 | `GET` | `/api/runs/{run_id}` | 查询单次运行状态与错误信息 |
+| `POST` | `/api/runs/{run_id}/resume` | 显式继续 interrupted run 的最后安全 checkpoint |
+| `POST` | `/api/runs/{run_id}/retry` | 从原 run 的基线 checkpoint 创建并执行子 run |
 | `GET` | `/api/threads/{thread_id}/events` | 查询持久化事件；支持 `after_event_id` 游标 |
 | `GET` | `/api/threads/{thread_id}/artifacts` | 查询上传与生成产物元数据，不暴露服务器路径 |
 | `GET` | `/api/artifacts/{artifact_id}/download` | 通过持久化产物 ID 安全下载文件 |
@@ -262,12 +264,21 @@ at-least-once 语义，重放与实时推送并发时可能收到重复事件，
 - [x] 持久化会话消息与 run 生命周期，支持请求幂等和同线程并发保护
 - [x] 持久化 WebSocket 事件并支持断线重放和同会话多连接广播
 - [x] 提供会话历史查询、产物元数据和基于产物 ID 的安全下载接口
+- [x] 启动时对账未完成 run，并提供显式 checkpoint 恢复与安全重试
 - [ ] 为搜索结果增加可信度评分与引用溯源
 - [ ] 增加 Agent 调用链路、Token 成本和任务耗时指标
 
 ## ⚠️ 当前限制
 
-- 服务重启后可以读取 LangGraph checkpoint 和业务历史，但尚不会自动恢复中断的后台任务；运行恢复将在后续阶段加入。
+- 服务启动时会自动重新调度尚未开始的 `queued` run，并把上次进程遗留的
+  `running` run 标记为 `interrupted`。后者不会自动执行，需调用 `resume`
+  或 `retry` 接口，避免在未确认的情况下重复产生外部工具副作用。
+- `resume` 会从目标 run 的最后一个安全 checkpoint 继续。LangGraph 恢复时可能
+  从当前节点开头重新执行，因此该节点内已经发生、但未被 checkpoint 记录的
+  外部副作用仍可能重复；调用方应只在确认后显式恢复。
+- 本阶段升级前产生的旧 run 没有业务 `run_id` 元数据和基线 checkpoint，无法
+  安全地使用新的 `resume` / `retry` 接口；如需重新执行，应使用新的
+  `thread_id` 提交任务，避免继承旧 run 的部分状态。
 - 各外部能力需要可用的模型服务、Tavily、RAGFlow 和 MySQL 配置。
 - 项目当前为学习与工程实践版本，生产部署前还需增加身份认证、请求限流、密钥管理和更完整的沙箱隔离。
 

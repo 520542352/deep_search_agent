@@ -40,6 +40,7 @@ class RunRecord:
     thread_id: str
     parent_run_id: str | None
     request_id: str | None
+    base_checkpoint_id: str | None
     query: str
     status: str
     error_code: str | None
@@ -64,6 +65,12 @@ class MessageRecord:
 class SubmissionResult:
     run: RunRecord
     created: bool
+
+
+@dataclass(frozen=True)
+class StartupReconciliation:
+    queued_run_ids: tuple[str, ...]
+    interrupted_run_ids: tuple[str, ...]
 
 
 def _run_from_row(row: sqlite3.Row) -> RunRecord:
@@ -108,6 +115,8 @@ class ConversationRepository:
         thread_id: str,
         query: str,
         request_id: str,
+        *,
+        base_checkpoint_id: str | None = None,
     ) -> SubmissionResult:
         async with self.database.write_transaction() as connection:
             existing = await (
@@ -144,10 +153,11 @@ class ConversationRepository:
             run_id = str(uuid.uuid4())
             await connection.execute(
                 """
-                INSERT INTO runs (id, thread_id, request_id, query, status)
-                VALUES (?, ?, ?, ?, 'queued')
+                INSERT INTO runs (
+                    id, thread_id, request_id, base_checkpoint_id, query, status
+                ) VALUES (?, ?, ?, ?, ?, 'queued')
                 """,
-                (run_id, thread_id, request_id, query),
+                (run_id, thread_id, request_id, base_checkpoint_id, query),
             )
             await self._append_message(
                 thread_id=thread_id,
@@ -185,6 +195,131 @@ class ConversationRepository:
             )
         ).fetchall()
         return [_message_from_row(row) for row in rows]
+
+    async def reconcile_startup(self) -> StartupReconciliation:
+        async with self.database.write_transaction() as connection:
+            interrupted_rows = await (
+                await connection.execute(
+                    "SELECT id FROM runs WHERE status = 'running' ORDER BY created_at, id"
+                )
+            ).fetchall()
+            await connection.execute(
+                """
+                UPDATE runs
+                SET status = 'interrupted',
+                    error_code = 'ProcessInterrupted',
+                    error_message = 'Agent process stopped before the run completed',
+                    finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE status = 'running'
+                """
+            )
+            queued_rows = await (
+                await connection.execute(
+                    "SELECT id FROM runs WHERE status = 'queued' ORDER BY created_at, id"
+                )
+            ).fetchall()
+        return StartupReconciliation(
+            queued_run_ids=tuple(row["id"] for row in queued_rows),
+            interrupted_run_ids=tuple(row["id"] for row in interrupted_rows),
+        )
+
+    async def claim_resume(self, run_id: str) -> RunRecord:
+        async with self.database.write_transaction() as connection:
+            row = await (
+                await connection.execute(
+                    "SELECT * FROM runs WHERE id = ?",
+                    (run_id,),
+                )
+            ).fetchone()
+            if row is None:
+                raise RecordNotFoundError(f"run not found: {run_id}")
+            run = _run_from_row(row)
+            if run.status != "interrupted":
+                raise InvalidRunTransitionError(
+                    f"run {run_id!r} is not interrupted"
+                )
+            active = await (
+                await connection.execute(
+                    """
+                    SELECT id FROM runs
+                    WHERE thread_id = ? AND status IN ('queued', 'running')
+                    """,
+                    (run.thread_id,),
+                )
+            ).fetchone()
+            if active is not None:
+                raise ActiveRunConflictError(
+                    f"thread {run.thread_id!r} already has an active run"
+                )
+            await connection.execute(
+                """
+                UPDATE runs
+                SET status = 'running',
+                    error_code = NULL,
+                    error_message = NULL,
+                    finished_at = NULL
+                WHERE id = ?
+                """,
+                (run_id,),
+            )
+        return await self.get_run(run_id)
+
+    async def retry_run(self, run_id: str, *, request_id: str) -> RunRecord:
+        async with self.database.write_transaction() as connection:
+            row = await (
+                await connection.execute(
+                    "SELECT * FROM runs WHERE id = ?",
+                    (run_id,),
+                )
+            ).fetchone()
+            if row is None:
+                raise RecordNotFoundError(f"run not found: {run_id}")
+            original = _run_from_row(row)
+            if original.status not in {"failed", "interrupted", "cancelled"}:
+                raise InvalidRunTransitionError(
+                    f"run {run_id!r} cannot be retried from {original.status!r}"
+                )
+            if original.base_checkpoint_id is None:
+                raise InvalidRunTransitionError(
+                    f"run {run_id!r} has no checkpoint baseline"
+                )
+            active = await (
+                await connection.execute(
+                    """
+                    SELECT id FROM runs
+                    WHERE thread_id = ? AND status IN ('queued', 'running')
+                    """,
+                    (original.thread_id,),
+                )
+            ).fetchone()
+            if active is not None:
+                raise ActiveRunConflictError(
+                    f"thread {original.thread_id!r} already has an active run"
+                )
+            retry_id = str(uuid.uuid4())
+            await connection.execute(
+                """
+                INSERT INTO runs (
+                    id, thread_id, parent_run_id, request_id,
+                    base_checkpoint_id, query, status
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued')
+                """,
+                (
+                    retry_id,
+                    original.thread_id,
+                    original.id,
+                    request_id,
+                    original.base_checkpoint_id,
+                    original.query,
+                ),
+            )
+            await self._append_message(
+                thread_id=original.thread_id,
+                run_id=retry_id,
+                role="user",
+                content=original.query,
+            )
+        return await self.get_run(retry_id)
 
     async def mark_running(self, run_id: str) -> RunRecord:
         async with self.database.write_transaction() as connection:

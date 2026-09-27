@@ -49,10 +49,17 @@ async def test_database_initializes_schema_and_pragmas(tmp_path: Path) -> None:
         busy_timeout = await (
             await database.connection.execute("PRAGMA busy_timeout")
         ).fetchone()
+        run_columns = {
+            row["name"]
+            for row in await (
+                await database.connection.execute("PRAGMA table_info(runs)")
+            ).fetchall()
+        }
 
         assert foreign_keys[0] == 1
         assert journal_mode[0] == "wal"
         assert busy_timeout[0] == 5_000
+        assert "base_checkpoint_id" in run_columns
     finally:
         await database.close()
 
@@ -69,11 +76,9 @@ async def test_database_migrations_are_idempotent(tmp_path: Path) -> None:
     await second.connect()
     try:
         row = await (
-            await second.connection.execute(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = 1"
-            )
+            await second.connection.execute("SELECT COUNT(*) FROM schema_migrations")
         ).fetchone()
-        assert row[0] == 1
+        assert row[0] == 2
     finally:
         await second.close()
 

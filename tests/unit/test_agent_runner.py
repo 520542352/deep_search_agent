@@ -21,10 +21,16 @@ async def repository(tmp_path: Path):
 
 @pytest.mark.unit
 async def test_runner_persists_success_and_assistant_message(repository) -> None:
-    submission = await repository.submit("thread-a", "research", "request-a")
+    submission = await repository.submit(
+        "thread-a",
+        "research",
+        "request-a",
+        base_checkpoint_id="checkpoint-before-run",
+    )
 
-    async def execute(query: str, thread_id: str, *, agent) -> str:
+    async def execute(query: str, thread_id: str, *, agent, checkpoint_id) -> str:
         assert (query, thread_id, agent) == ("research", "thread-a", "fake-agent")
+        assert checkpoint_id == "checkpoint-before-run"
         assert get_run_context() == submission.run.id
         assert get_thread_context() == "thread-a"
         running = await repository.get_run(submission.run.id)
@@ -51,7 +57,7 @@ async def test_runner_persists_success_and_assistant_message(repository) -> None
 async def test_runner_persists_failure_and_reraises(repository) -> None:
     submission = await repository.submit("thread-a", "research", "request-a")
 
-    async def execute(query: str, thread_id: str, *, agent) -> str:
+    async def execute(query: str, thread_id: str, *, agent, checkpoint_id) -> str:
         raise RuntimeError("model unavailable")
 
     runner = AgentRunner(repository, agent="fake-agent", execute=execute)
@@ -91,7 +97,7 @@ async def test_runner_indexes_generated_files_before_marking_success(
         output_root=output_root,
     )
 
-    async def execute(query: str, thread_id: str, *, agent) -> str:
+    async def execute(query: str, thread_id: str, *, agent, checkpoint_id) -> str:
         return "final answer"
 
     runner = AgentRunner(
@@ -105,4 +111,38 @@ async def test_runner_indexes_generated_files_before_marking_success(
     indexed = await artifacts.list_for_thread("thread-a")
     assert [(item.run_id, item.kind, item.filename) for item in indexed] == [
         (submission.run.id, "generated", "report.md")
+    ]
+
+
+@pytest.mark.unit
+async def test_runner_resumes_interrupted_run_and_persists_result(repository) -> None:
+    submission = await repository.submit("thread-a", "research", "request-a")
+    await repository.mark_running(submission.run.id)
+    await repository.reconcile_startup()
+
+    async def execute(query: str, thread_id: str, *, agent, checkpoint_id) -> str:
+        raise AssertionError("resume must not submit the original query again")
+
+    async def resume_execute(thread_id: str, *, agent, checkpoint_id) -> str:
+        assert (thread_id, agent) == ("thread-a", "fake-agent")
+        assert checkpoint_id == "checkpoint-for-run"
+        assert get_run_context() == submission.run.id
+        assert get_thread_context() == "thread-a"
+        assert (await repository.get_run(submission.run.id)).status == "running"
+        return "resumed answer"
+
+    runner = AgentRunner(
+        repository,
+        agent="fake-agent",
+        execute=execute,
+        resume_execute=resume_execute,
+    )
+    await repository.claim_resume(submission.run.id)
+    await runner.resume(submission.run.id, checkpoint_id="checkpoint-for-run")
+
+    run = await repository.get_run(submission.run.id)
+    assert run.status == "succeeded"
+    assert [(message.role, message.content) for message in await repository.list_messages("thread-a")] == [
+        ("user", "research"),
+        ("assistant", "resumed answer"),
     ]

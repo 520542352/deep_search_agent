@@ -20,7 +20,12 @@ from api.monitor import monitor
 import shutil
 from pathlib import Path
 
-from api.context import set_session_context, reset_session_context, set_thread_context
+from api.context import (
+    get_run_context,
+    reset_session_context,
+    set_session_context,
+    set_thread_context,
+)
 
 from langchain_core.messages import AIMessage
 
@@ -55,7 +60,13 @@ def build_main_agent(
 project_root_path = Path(__file__).parents[1].resolve()
 # 3.创建辅助函数
 
-async def run_deep_agent(task_query: str, thread_id: str = None, *, agent):
+async def run_deep_agent(
+    task_query: str,
+    thread_id: str = None,
+    *,
+    agent,
+    checkpoint_id: str | None = None,
+):
     session_token = None
     thread_token = None
     final_result = ""
@@ -69,7 +80,7 @@ async def run_deep_agent(task_query: str, thread_id: str = None, *, agent):
         monitor.report_session_dir(session_dir_str)
 
         # 3. [运行时配置] Langchain Config
-        config = {"configurable": {"thread_id": thread_id}}
+        config = _agent_config(thread_id, checkpoint_id=checkpoint_id)
 
         # 4. [提示词构建] 动态注入环境约束
         path_instruction = f"""
@@ -103,6 +114,66 @@ async def run_deep_agent(task_query: str, thread_id: str = None, *, agent):
         # 7. [资源处理] 必须重置ContextVars，防止线程池复用导致上下文污染
         if session_token is not None:
             reset_session_context(session_token, thread_token)
+
+
+async def resume_deep_agent(
+    thread_id: str,
+    *,
+    agent,
+    checkpoint_id: str | None = None,
+):
+    session_token = None
+    thread_token = None
+    final_result = ""
+    config = _agent_config(thread_id, checkpoint_id=checkpoint_id)
+    try:
+        session_dir_str = _prepare_resume_environment(thread_id)
+        thread_token = set_thread_context(thread_id)
+        session_token = set_session_context(session_dir_str)
+        monitor.report_session_dir(session_dir_str)
+
+        async for chunk in agent.astream(None, config=config):
+            chunk_result = _process_stream_chunk(chunk)
+            if chunk_result is not None:
+                final_result = chunk_result
+
+        if not final_result:
+            snapshot = await agent.aget_state(config)
+            if snapshot.next:
+                raise RuntimeError("checkpoint resume did not complete")
+            messages = snapshot.values.get("messages", [])
+            for message in reversed(messages):
+                if isinstance(message, AIMessage) and not message.tool_calls:
+                    final_result = str(message.content)
+                    break
+            if final_result:
+                monitor.report_task_result(final_result)
+        return final_result
+    except Exception as e:
+        logger.error(f"Error:{e}")
+        monitor._emit("error", f"Exception failed: {str(e)}")
+        raise
+    finally:
+        if session_token is not None:
+            reset_session_context(session_token, thread_token)
+
+
+def _prepare_resume_environment(thread_id: str) -> str:
+    """Restore only the output workspace; do not recopy uploads on resume."""
+    thread_id = validate_thread_id(thread_id)
+    session_dir = project_root_path / "output" / f"session_{thread_id}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return str(session_dir).replace("\\", "/")
+
+
+def _agent_config(thread_id: str, *, checkpoint_id: str | None = None) -> dict:
+    configurable = {"thread_id": thread_id}
+    run_id = get_run_context()
+    if run_id is not None:
+        configurable["persistence_run_id"] = run_id
+    if checkpoint_id is not None:
+        configurable["checkpoint_id"] = checkpoint_id
+    return {"configurable": configurable}
 
 
 # 辅助函数：_prepare_session_environment用于初始化会话的运行环境（会话文件夹、相对路径、上传文件信息）
