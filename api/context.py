@@ -6,6 +6,8 @@ _session_dir_ctx: ContextVar[Optional[str]] = ContextVar("session_dir",default=N
 # 存储当前会话对应的websocket
 _thread_id_ctx: ContextVar[Optional[str]] = ContextVar("thread_id",default=None)
 
+_run_id_ctx: ContextVar[Optional[str]] = ContextVar("run_id", default=None)
+
 def set_session_context(path: str):
     return _session_dir_ctx.set(path)
 
@@ -17,6 +19,18 @@ def set_thread_context(thread_id: str):
 
 def get_thread_context() -> Optional[str]:
     return _thread_id_ctx.get()
+
+def reset_thread_context(thread_token):
+    _thread_id_ctx.reset(thread_token)
+
+def set_run_context(run_id: str):
+    return _run_id_ctx.set(run_id)
+
+def get_run_context() -> Optional[str]:
+    return _run_id_ctx.get()
+
+def reset_run_context(run_token):
+    _run_id_ctx.reset(run_token)
 
 def reset_session_context(session_token, thread_token=None):
     _session_dir_ctx.reset(session_token)

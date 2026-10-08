@@ -1,10 +1,31 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import main_agent
-from api.context import get_session_context, get_thread_context
+from api.context import (
+    get_session_context,
+    get_thread_context,
+    reset_run_context,
+    set_run_context,
+)
+from evals.fakes import ScriptedChatModel
+
+
+@pytest.mark.unit
+def test_build_main_agent_uses_injected_checkpointer() -> None:
+    checkpointer = InMemorySaver()
+    graph = main_agent.build_main_agent(
+        checkpointer,
+        chat_model=ScriptedChatModel(responses=[AIMessage(content="done")]),
+        subagents=[],
+        tools=[],
+    )
+
+    assert graph.checkpointer is checkpointer
 
 
 @pytest.mark.unit
@@ -78,6 +99,19 @@ class _StreamingAgent:
             raise self.error
 
 
+class _ResumeAgent(_StreamingAgent):
+    def __init__(self, chunks=(), state_messages=(), next_nodes=()) -> None:
+        super().__init__(chunks)
+        self.state_messages = list(state_messages)
+        self.next_nodes = tuple(next_nodes)
+
+    async def aget_state(self, config: dict):
+        return SimpleNamespace(
+            values={"messages": self.state_messages},
+            next=self.next_nodes,
+        )
+
+
 @pytest.mark.unit
 async def test_run_agent_builds_request_consumes_stream_and_resets_context(
     monkeypatch: pytest.MonkeyPatch,
@@ -87,7 +121,6 @@ async def test_run_agent_builds_request_consumes_stream_and_resets_context(
     )
     session_reports: list[str] = []
     result_reports: list[str] = []
-    monkeypatch.setattr(main_agent, "main_agent", agent)
     monkeypatch.setattr(
         main_agent,
         "_prepare_session_environment",
@@ -96,13 +129,28 @@ async def test_run_agent_builds_request_consumes_stream_and_resets_context(
     monkeypatch.setattr(main_agent.monitor, "report_session_dir", session_reports.append)
     monkeypatch.setattr(main_agent.monitor, "report_task_result", result_reports.append)
 
-    result = await main_agent.run_deep_agent("research", "thread-a")
+    run_token = set_run_context("run-a")
+    try:
+        result = await main_agent.run_deep_agent(
+            "research",
+            "thread-a",
+            agent=agent,
+            checkpoint_id="checkpoint-before-run",
+        )
+    finally:
+        reset_run_context(run_token)
 
-    assert result == "Done"
+    assert result == "final answer"
     assert session_reports == ["C:/sessions/thread-a"]
     assert result_reports == ["final answer"]
     inputs, config = agent.calls[0]
-    assert config == {"configurable": {"thread_id": "thread-a"}}
+    assert config == {
+        "configurable": {
+            "thread_id": "thread-a",
+            "persistence_run_id": "run-a",
+            "checkpoint_id": "checkpoint-before-run",
+        }
+    }
     assert inputs["messages"][0]["content"].startswith("research")
     assert "output/session_thread-a" in inputs["messages"][0]["content"]
     assert "uploaded" in inputs["messages"][0]["content"]
@@ -116,7 +164,6 @@ async def test_run_agent_reports_stream_failure_and_resets_context(
 ) -> None:
     agent = _StreamingAgent(error=RuntimeError("stream failed"))
     errors: list[tuple[str, str]] = []
-    monkeypatch.setattr(main_agent, "main_agent", agent)
     monkeypatch.setattr(
         main_agent,
         "_prepare_session_environment",
@@ -127,9 +174,9 @@ async def test_run_agent_reports_stream_failure_and_resets_context(
         main_agent.monitor, "_emit", lambda event, message: errors.append((event, message))
     )
 
-    result = await main_agent.run_deep_agent("research", "thread-a")
+    with pytest.raises(RuntimeError, match="stream failed"):
+        await main_agent.run_deep_agent("research", "thread-a", agent=agent)
 
-    assert result == "Error: stream failed"
     assert errors == [("error", "Exception failed: stream failed")]
     assert get_session_context() is None
     assert get_thread_context() is None
@@ -149,9 +196,9 @@ async def test_run_agent_converts_environment_preparation_failure(
         main_agent.monitor, "_emit", lambda _event, message: errors.append(message)
     )
 
-    result = await main_agent.run_deep_agent("research", "bad")
+    with pytest.raises(ValueError, match="invalid workspace"):
+        await main_agent.run_deep_agent("research", "bad", agent=None)
 
-    assert result == "Error: invalid workspace"
     assert errors == ["Exception failed: invalid workspace"]
     assert get_session_context() is None
     assert get_thread_context() is None
@@ -162,7 +209,6 @@ async def test_run_agent_accepts_stream_without_final_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     agent = _StreamingAgent([{"tools": {"messages": []}}])
-    monkeypatch.setattr(main_agent, "main_agent", agent)
     monkeypatch.setattr(
         main_agent,
         "_prepare_session_environment",
@@ -170,4 +216,87 @@ async def test_run_agent_accepts_stream_without_final_message(
     )
     monkeypatch.setattr(main_agent.monitor, "report_session_dir", lambda _path: None)
 
-    assert await main_agent.run_deep_agent("research", "thread-a") == "Done"
+    assert await main_agent.run_deep_agent(
+        "research", "thread-a", agent=agent
+    ) == ""
+
+
+@pytest.mark.unit
+async def test_resume_agent_continues_checkpoint_without_new_user_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ResumeAgent(
+        [{"model": {"messages": [AIMessage(content="resumed answer")]}}]
+    )
+    session_reports: list[str] = []
+    monkeypatch.setattr(
+        main_agent,
+        "_prepare_resume_environment",
+        lambda thread_id: "C:/sessions/thread-a",
+    )
+    monkeypatch.setattr(main_agent.monitor, "report_session_dir", session_reports.append)
+    monkeypatch.setattr(main_agent.monitor, "report_task_result", lambda _result: None)
+
+    run_token = set_run_context("run-a")
+    try:
+        result = await main_agent.resume_deep_agent(
+            "thread-a",
+            agent=agent,
+            checkpoint_id="checkpoint-for-run",
+        )
+    finally:
+        reset_run_context(run_token)
+
+    assert result == "resumed answer"
+    assert agent.calls == [
+        (
+            None,
+            {
+                "configurable": {
+                    "thread_id": "thread-a",
+                    "persistence_run_id": "run-a",
+                    "checkpoint_id": "checkpoint-for-run",
+                }
+            },
+        )
+    ]
+    assert session_reports == ["C:/sessions/thread-a"]
+    assert get_session_context() is None
+    assert get_thread_context() is None
+
+
+@pytest.mark.unit
+async def test_resume_agent_uses_checkpoint_answer_when_graph_already_finished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ResumeAgent(state_messages=[AIMessage(content="checkpoint answer")])
+    monkeypatch.setattr(
+        main_agent,
+        "_prepare_resume_environment",
+        lambda thread_id: "C:/sessions/thread-a",
+    )
+    monkeypatch.setattr(main_agent.monitor, "report_session_dir", lambda _path: None)
+
+    result = await main_agent.resume_deep_agent("thread-a", agent=agent)
+
+    assert result == "checkpoint answer"
+
+
+@pytest.mark.unit
+async def test_resume_agent_does_not_reuse_old_answer_while_graph_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ResumeAgent(
+        state_messages=[AIMessage(content="old answer")],
+        next_nodes=["pending-tool"],
+    )
+    monkeypatch.setattr(
+        main_agent,
+        "_prepare_resume_environment",
+        lambda thread_id: "C:/sessions/thread-a",
+    )
+    monkeypatch.setattr(main_agent.monitor, "report_session_dir", lambda _path: None)
+    monkeypatch.setattr(main_agent.monitor, "_emit", lambda *_args: None)
+
+    with pytest.raises(RuntimeError, match="did not complete"):
+        await main_agent.resume_deep_agent("thread-a", agent=agent)

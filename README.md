@@ -24,7 +24,7 @@
 
 - **多智能体协作**：主 Agent 统一规划任务，按需委派网络搜索、数据库查询和 RAGFlow 知识库三类专家 Agent。
 - **多源深度研究**：同时覆盖公开网络信息、企业内部文档与 MySQL 结构化数据，支持递进式检索和交叉补充。
-- **异步任务与实时可观测**：FastAPI 后台异步执行长任务，WebSocket 按 `thread_id` 推送子 Agent 调用、工具执行和文件生成进度。
+- **异步任务与可重放事件**：FastAPI 后台执行长任务，SQLite 持久化会话、运行状态和实时事件；WebSocket 支持按 `event_id` 断线续传。
 - **文件理解与研究交付**：支持读取 Markdown、Word、PDF 和 Excel，并将研究结果输出为 Markdown / PDF。
 - **会话级资源隔离**：使用 `ContextVar` 绑定任务目录和 WebSocket 会话，避免并发任务之间的路径与消息污染。
 - **工具层安全边界**：文件路径强制限定在当前会话目录；SQL 限制为单条只读查询，配合只读事务与结果行数上限降低风险。
@@ -61,12 +61,12 @@
 ## 🔄 工作流程
 
 1. 前端为会话生成 `thread_id`，可先上传用户文件，再通过 `/api/task` 提交研究问题。
-2. FastAPI 在后台启动异步 Agent 任务，并立即向前端返回会话 ID。
+2. FastAPI 原子写入会话、原始用户消息和 `queued` run，再启动异步 Agent，并立即返回 `thread_id`、`run_id` 与 `request_id`。
 3. 运行时为任务创建 `output/session_{thread_id}` 独立工作目录，复制上传文件并绑定异步上下文。
 4. 主 Agent 根据问题拆解 TODO，将子任务分派给合适的专家 Agent。
 5. 专家 Agent 独立使用 Tavily、MySQL 或 RAGFlow 获取信息，结果返回主 Agent 继续迭代研究。
 6. 主 Agent 综合多源结果，直接回答用户，或按需生成 Markdown / PDF 报告。
-7. 全过程的子 Agent 调用、工具进度和最终结果通过 WebSocket 定向推送给当前会话。
+7. run 按 `queued → running → succeeded/failed` 更新；执行事件先写入 SQLite，再通过 WebSocket 广播给当前会话的所有连接。
 
 ## 🧠 Agent 设计
 
@@ -107,11 +107,14 @@ LLM 输出不应被直接信任，因此项目在工具层而不是仅在 Prompt
 deep-search-agent/
 ├── agent/
 │   ├── main_agent.py                 # 主 Agent 创建与运行时入口
+│   ├── runner.py                     # Agent 运行与持久化状态流转
 │   ├── llm.py                        # OpenAI-compatible 模型配置
 │   ├── prompts.py                    # YAML 提示词加载
 │   └── sub_agents/                   # 网络、DB、RAGFlow 子 Agent
 ├── api/
 │   ├── server.py                     # HTTP / WebSocket API
+│   ├── schemas.py                    # API 请求与响应模型
+│   ├── events.py                     # 持久化事件发布器
 │   ├── context.py                    # 会话级 ContextVar
 │   └── monitor.py                    # 执行事件监控与推送
 ├── tools/
@@ -125,6 +128,9 @@ deep-search-agent/
 │   ├── path_utils.py                 # 路径规范化与越界防护
 │   └── pdf_renderer.py               # Markdown → HTML → PDF
 ├── prompt/prompts.yaml             # 主子 Agent 角色与工作流
+├── persistence/                    # SQLite 连接、迁移与业务数据表
+├── scripts/                        # SQLite 备份、恢复、健康检查和清理工具
+├── data/                           # 本地持久化数据库（Git 忽略）
 ├── output/                        # 会话输出（Git 忽略）
 ├── upload/                        # 临时上传（Git 忽略）
 ├── pyproject.toml
@@ -174,6 +180,12 @@ MYSQL_PORT=3306
 MYSQL_USER=readonly_user
 MYSQL_PASSWORD=your_password
 MYSQL_DATABASE=your_database
+
+# 可选：业务数据库位置，默认 data/application.db
+DEEP_SEARCH_DATABASE_PATH=/path/to/application.db
+
+# 可选：LangGraph Checkpoint 数据库位置，默认 data/checkpoints.db
+DEEP_SEARCH_CHECKPOINT_PATH=/path/to/checkpoints.db
 ```
 
 ### 4. 启动后端
@@ -198,23 +210,53 @@ npm run dev
 
 默认访问 `http://127.0.0.1:5173`。前端当前预设后端地址为 `http://127.0.0.1:8000`。
 
+### 6. 持久化运维
+
+两份 SQLite 数据库及上传/输出文件的备份、校验、恢复演练和保留期清理方法见
+[SQLite 持久化运维指南](docs/persistence.md)。健康检查和备份不依赖任何外部服务；
+真正执行历史数据清理前必须先备份并停止 API 服务。
+
 ## 🔌 API 概览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/task` | 提交研究问题，后台启动 Agent 并返回 `thread_id` |
-| `POST` | `/api/upload` | 将多个文件上传到指定会话 |
-| `GET` | `/api/files` | 获取当前会话的生成文件列表 |
-| `GET` | `/api/download` | 下载 `output` 目录中的生成文件 |
-| `WS` | `/ws/{thread_id}` | 接收会话级实时执行事件 |
+| `POST` | `/api/task` | 提交研究问题，持久化任务并返回 `thread_id`、`run_id`、`request_id` |
+| `POST` | `/api/upload` | 将多个文件上传到指定会话并登记持久化元数据 |
+| `GET` | `/api/threads` | 查询持久化会话列表 |
+| `GET` | `/api/threads/{thread_id}` | 查询单个会话 |
+| `GET` | `/api/threads/{thread_id}/messages` | 查询会话消息历史 |
+| `GET` | `/api/threads/{thread_id}/runs` | 查询会话运行历史 |
+| `GET` | `/api/runs/{run_id}` | 查询单次运行状态与错误信息 |
+| `POST` | `/api/runs/{run_id}/resume` | 显式继续 interrupted run 的最后安全 checkpoint |
+| `POST` | `/api/runs/{run_id}/retry` | 从原 run 的基线 checkpoint 创建并执行子 run |
+| `GET` | `/api/threads/{thread_id}/events` | 查询持久化事件；支持 `after_event_id` 游标 |
+| `GET` | `/api/threads/{thread_id}/artifacts` | 查询上传与生成产物元数据，不暴露服务器路径 |
+| `GET` | `/api/artifacts/{artifact_id}/download` | 通过持久化产物 ID 安全下载文件 |
+| `GET` | `/api/files` | 旧版路径式文件列表接口（已弃用） |
+| `GET` | `/api/download` | 旧版路径式下载接口（已弃用） |
+| `WS` | `/ws/{thread_id}` | 接收实时事件；可通过 `after_event_id` 重放断线期间事件 |
 
 启动任务示例：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/task \
   -H "Content-Type: application/json" \
-  -d '{"query":"结合公开信息、内部知识和业务数据，生成一份市场分析报告"}'
+  -d '{"query":"结合公开信息、内部知识和业务数据，生成一份市场分析报告","request_id":"client-request-001"}'
 ```
+
+`request_id` 可由调用方提供以实现幂等重试；省略时由服务端生成。相同
+`thread_id + request_id` 的重复请求返回原 `run_id`，不会再次执行。同一
+`thread_id` 同时只允许一个 `queued` 或 `running` run，冲突时返回 HTTP 409。
+
+WebSocket 事件包含稳定递增的 `event_id`。客户端重连时可使用：
+
+```text
+ws://127.0.0.1:8000/ws/{thread_id}?after_event_id=123
+```
+
+服务端会重放该会话中 ID 大于 123 的事件，再继续推送实时事件。协议采用
+at-least-once 语义，重放与实时推送并发时可能收到重复事件，客户端应按
+`event_id` 去重。
 
 ## 📊 设计取舍
 
@@ -225,13 +267,26 @@ curl -X POST http://127.0.0.1:8000/api/task \
 
 ## 🗺️ Roadmap
 
-- [ ] 引入 LangGraph Checkpointer，支持服务重启后的会话恢复
+- [x] 引入 LangGraph SQLite Checkpointer，持久化会话状态
+- [x] 持久化会话消息与 run 生命周期，支持请求幂等和同线程并发保护
+- [x] 持久化 WebSocket 事件并支持断线重放和同会话多连接广播
+- [x] 提供会话历史查询、产物元数据和基于产物 ID 的安全下载接口
+- [x] 启动时对账未完成 run，并提供显式 checkpoint 恢复与安全重试
+- [x] 增加 SQLite 备份、校验、恢复演练、健康检查与保守清理工具
 - [ ] 为搜索结果增加可信度评分与引用溯源
 - [ ] 增加 Agent 调用链路、Token 成本和任务耗时指标
 
 ## ⚠️ 当前限制
 
-- `thread_id` 当前用于会话路由、输出目录和运行时配置，项目尚未配置持久化 Checkpointer。
+- 服务启动时会自动重新调度尚未开始的 `queued` run，并把上次进程遗留的
+  `running` run 标记为 `interrupted`。后者不会自动执行，需调用 `resume`
+  或 `retry` 接口，避免在未确认的情况下重复产生外部工具副作用。
+- `resume` 会从目标 run 的最后一个安全 checkpoint 继续。LangGraph 恢复时可能
+  从当前节点开头重新执行，因此该节点内已经发生、但未被 checkpoint 记录的
+  外部副作用仍可能重复；调用方应只在确认后显式恢复。
+- 本阶段升级前产生的旧 run 没有业务 `run_id` 元数据和基线 checkpoint，无法
+  安全地使用新的 `resume` / `retry` 接口；如需重新执行，应使用新的
+  `thread_id` 提交任务，避免继承旧 run 的部分状态。
 - 各外部能力需要可用的模型服务、Tavily、RAGFlow 和 MySQL 配置。
 - 项目当前为学习与工程实践版本，生产部署前还需增加身份认证、请求限流、密钥管理和更完整的沙箱隔离。
 

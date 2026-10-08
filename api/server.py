@@ -1,16 +1,47 @@
 import sys
 import uuid
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from typing import List
 import shutil
 from loguru import logger
 
 from utils.path_utils import validate_thread_id
+from persistence.database import Database, resolve_database_path
+from persistence.artifacts import ArtifactRepository, ArtifactService
+from persistence.events import EventRepository
+from persistence.repositories import (
+    ActiveRunConflictError,
+    ConversationRepository,
+    InvalidRunTransitionError,
+    RecordNotFoundError,
+)
+from agent.runtime import AgentRuntime, resolve_checkpoint_path
+from agent.runner import AgentRunner
+from api.schemas import (
+    ArtifactResponse,
+    EventResponse,
+    MessageResponse,
+    RunResponse,
+    RunRecoveryResponse,
+    TaskRequest,
+    TaskResponse,
+    ThreadResponse,
+)
+from api.events import EventPublisher
 
 # 配置项目路径到环境变量
 project_root = Path(__file__).resolve().parents[1]
@@ -18,10 +49,67 @@ if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
 # 导入agent已经monitor
-from agent.main_agent import run_deep_agent
+from agent.main_agent import build_main_agent, resume_deep_agent, run_deep_agent
 from api.monitor import monitor,manager
 
-app = FastAPI(title="DeepAgents API")
+database_path = resolve_database_path(project_root)
+checkpoint_path = resolve_checkpoint_path(project_root)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    database = Database(database_path)
+    agent_runtime = AgentRuntime(
+        checkpoint_path,
+        agent_factory=build_main_agent,
+    )
+    await database.connect()
+    try:
+        await agent_runtime.start()
+        conversation_repository = ConversationRepository(database)
+        event_repository = EventRepository(database)
+        event_publisher = EventPublisher(event_repository, manager)
+        artifact_repository = ArtifactRepository(database)
+        artifact_service = ArtifactService(
+            artifact_repository,
+            upload_root=upload_dir,
+            output_root=output_dir,
+        )
+        agent_runner = AgentRunner(
+            conversation_repository,
+            agent=agent_runtime.agent,
+            execute=run_deep_agent,
+            resume_execute=resume_deep_agent,
+            artifact_service=artifact_service,
+        )
+        app.state.database = database
+        app.state.agent_runtime = agent_runtime
+        app.state.conversation_repository = conversation_repository
+        app.state.agent_runner = agent_runner
+        app.state.event_repository = event_repository
+        app.state.event_publisher = event_publisher
+        app.state.artifact_repository = artifact_repository
+        app.state.artifact_service = artifact_service
+        manager.loop = asyncio.get_running_loop()
+        monitor.set_event_publisher(event_publisher, manager.loop)
+        reconciliation = await conversation_repository.reconcile_startup()
+        app.state.startup_reconciliation = reconciliation
+        for run_id in reconciliation.queued_run_ids:
+            _schedule_background(agent_runner.run(run_id))
+        yield
+    finally:
+        active_tasks = list(_background_tasks)
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+        await monitor.drain()
+        monitor.set_event_publisher(None)
+        await agent_runtime.close()
+        await database.close()
+
+
+app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 
 # 挂载输出目录，以便前端访问文件
 output_dir = project_root / "output"
@@ -40,11 +128,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class TaskRequest(BaseModel):
-    query: str
-    thread_id: str | None = None
-
-
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -59,8 +142,14 @@ def _handle_background_task(task: asyncio.Task) -> None:
         logger.error(f"Agent background task failed: {error}")
 
 
+def _schedule_background(coroutine) -> None:
+    task = asyncio.create_task(coroutine)
+    _background_tasks.add(task)
+    task.add_done_callback(_handle_background_task)
+
+
 # 开启任务接口实现
-@app.post("/api/task")
+@app.post("/api/task", response_model=TaskResponse)
 async def run_task(request: TaskRequest):
     """
     智能体任务启动接口 (Run Agent Task)。
@@ -83,18 +172,38 @@ async def run_task(request: TaskRequest):
 
     # 1. ID 初始化
     thread_id = request.thread_id or str(uuid.uuid4())
+    request_id = request.request_id or str(uuid.uuid4())
     try:
         validate_thread_id(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # 2. 后台异步执行 Agent
-    task = asyncio.create_task(run_deep_agent(request.query, thread_id))
-    _background_tasks.add(task)
-    task.add_done_callback(_handle_background_task)
-    # result = await run_deep_agent(request.query, thread_id)
+    try:
+        base_checkpoint_id = await app.state.agent_runtime.ensure_checkpoint_baseline(
+            thread_id
+        )
+        submission = await app.state.conversation_repository.submit(
+            thread_id=thread_id,
+            query=request.query,
+            request_id=request_id,
+            base_checkpoint_id=base_checkpoint_id,
+        )
+    except ActiveRunConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="该会话已有正在执行的任务",
+        ) from error
 
-    return {"status":"started", "thread_id":thread_id}
+    if submission.created:
+        _schedule_background(app.state.agent_runner.run(submission.run.id))
+
+    return TaskResponse(
+        status="started",
+        thread_id=thread_id,
+        run_id=submission.run.id,
+        request_id=request_id,
+        deduplicated=not submission.created,
+    )
 
 
 # 上传文件接口
@@ -137,26 +246,182 @@ async def upload_files(files: List[UploadFile] = File(...),thread_id: str = Form
     saved_files = []
     for file, safe_filename in validated_files:
         file_path = target_dir / safe_filename
+        staging_dir = upload_dir / ".staging"
+        staging_dir.mkdir(exist_ok=True)
+        operation_id = uuid.uuid4().hex
+        staged_path = staging_dir / f"{thread_id}-{operation_id}.upload"
+        backup_path = staging_dir / f"{thread_id}-{operation_id}.backup"
         # 使用二进制模式写入
         # shutil.copyfileobj 高效复制文件流，避免一次性加载大文件到内存
         try:
-            with file_path.open("wb") as buffer:
+            with staged_path.open("wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
         except OSError as exc:
             try:
-                file_path.unlink(missing_ok=True)
+                staged_path.unlink(missing_ok=True)
             except OSError as cleanup_error:
                 logger.warning(f"清理未完成的上传文件失败: {cleanup_error}")
             logger.error(f"保存上传文件失败: {exc}")
             raise HTTPException(status_code=500, detail="保存上传文件失败") from exc
+        had_existing_file = file_path.is_file()
+        try:
+            if had_existing_file:
+                file_path.replace(backup_path)
+            staged_path.replace(file_path)
+            await app.state.artifact_service.register_upload(
+                thread_id,
+                file_path,
+                media_type=file.content_type,
+            )
+        except Exception as exc:
+            try:
+                file_path.unlink(missing_ok=True)
+                if had_existing_file:
+                    backup_path.replace(file_path)
+                staged_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                logger.error(f"回滚上传文件失败: {cleanup_error}")
+            logger.error(f"登记上传文件失败: {exc}")
+            raise HTTPException(status_code=500, detail="登记上传文件失败") from exc
+        try:
+            backup_path.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            logger.warning(f"清理上传备份文件失败: {cleanup_error}")
         saved_files.append(safe_filename)
 
     # 3.返回成功保存的文件列表
     return {"status": "uploaded", "files": saved_files}
 
 
+async def _require_thread(thread_id: str):
+    try:
+        validate_thread_id(thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        return await app.state.conversation_repository.get_thread(thread_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="会话不存在") from exc
+
+
+@app.get("/api/threads", response_model=list[ThreadResponse])
+async def list_threads():
+    return await app.state.conversation_repository.list_threads()
+
+
+@app.get("/api/threads/{thread_id}", response_model=ThreadResponse)
+async def get_thread(thread_id: str):
+    return await _require_thread(thread_id)
+
+
+@app.get("/api/threads/{thread_id}/messages", response_model=list[MessageResponse])
+async def list_thread_messages(thread_id: str):
+    await _require_thread(thread_id)
+    return await app.state.conversation_repository.list_messages(thread_id)
+
+
+@app.get("/api/threads/{thread_id}/runs", response_model=list[RunResponse])
+async def list_thread_runs(thread_id: str):
+    await _require_thread(thread_id)
+    return await app.state.conversation_repository.list_runs(thread_id)
+
+
+@app.get("/api/runs/{run_id}", response_model=RunResponse)
+async def get_run(run_id: str):
+    try:
+        return await app.state.conversation_repository.get_run(run_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+
+
+@app.post("/api/runs/{run_id}/resume", response_model=RunRecoveryResponse)
+async def resume_run(run_id: str):
+    try:
+        run = await app.state.conversation_repository.get_run(run_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+    if run.status != "interrupted":
+        raise HTTPException(status_code=409, detail="只有中断的运行可以恢复")
+    checkpoint_id = await app.state.agent_runtime.checkpoint_id_for_run(
+        run.thread_id,
+        run.id,
+    )
+    if checkpoint_id is None:
+        raise HTTPException(status_code=409, detail="该运行没有可恢复的检查点")
+    try:
+        claimed = await app.state.conversation_repository.claim_resume(run_id)
+    except (ActiveRunConflictError, InvalidRunTransitionError) as exc:
+        raise HTTPException(status_code=409, detail="该会话无法恢复当前运行") from exc
+    _schedule_background(
+        app.state.agent_runner.resume(claimed.id, checkpoint_id=checkpoint_id)
+    )
+    return RunRecoveryResponse(
+        status="resumed",
+        thread_id=claimed.thread_id,
+        run_id=claimed.id,
+        parent_run_id=claimed.parent_run_id,
+    )
+
+
+@app.post("/api/runs/{run_id}/retry", response_model=RunRecoveryResponse)
+async def retry_run(run_id: str):
+    try:
+        retry = await app.state.conversation_repository.retry_run(
+            run_id,
+            request_id=str(uuid.uuid4()),
+        )
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+    except (ActiveRunConflictError, InvalidRunTransitionError) as exc:
+        raise HTTPException(status_code=409, detail="该运行当前无法重试") from exc
+    _schedule_background(app.state.agent_runner.run(retry.id))
+    return RunRecoveryResponse(
+        status="retried",
+        thread_id=retry.thread_id,
+        run_id=retry.id,
+        parent_run_id=retry.parent_run_id,
+    )
+
+
+@app.get("/api/threads/{thread_id}/events", response_model=list[EventResponse])
+async def list_thread_events(
+    thread_id: str,
+    after_event_id: int = Query(default=0, ge=0),
+):
+    await _require_thread(thread_id)
+    return await app.state.event_repository.list_after(
+        thread_id,
+        after_event_id=after_event_id,
+    )
+
+
+@app.get("/api/threads/{thread_id}/artifacts", response_model=list[ArtifactResponse])
+async def list_thread_artifacts(thread_id: str):
+    await _require_thread(thread_id)
+    return await app.state.artifact_repository.list_for_thread(thread_id)
+
+
+@app.get("/api/artifacts/{artifact_id}/download")
+async def download_artifact(artifact_id: str):
+    try:
+        artifact = await app.state.artifact_repository.get(artifact_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="产物不存在") from exc
+    try:
+        artifact_path = app.state.artifact_service.resolve(artifact)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="产物路径无效") from exc
+    if not artifact_path.is_file():
+        raise HTTPException(status_code=404, detail="产物文件不存在")
+    return FileResponse(
+        artifact_path,
+        filename=artifact.filename,
+        media_type=artifact.media_type,
+    )
+
+
 # 下载文件接口
-@app.get("/api/download")
+@app.get("/api/download", deprecated=True)
 async def download_file(path:str):
     """
     文件下载接口
@@ -189,7 +454,7 @@ async def download_file(path:str):
 
 
 # 查询所有文件列表接口
-@app.get("/api/files")
+@app.get("/api/files", deprecated=True)
 async def list_files(path: str):
     """
     文件列表查询接口
@@ -246,7 +511,11 @@ async def list_files(path: str):
 
 # WebSocket实时通讯
 @app.websocket("/ws/{thread_id}")
-async def websocket_endpoint(websocket: WebSocket, thread_id: str):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    thread_id: str,
+    after_event_id: int = 0,
+):
     """
     WebSocket实时通讯核心接口
 
@@ -268,10 +537,20 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     except ValueError:
         await websocket.close(code=1008, reason="无效的 thread_id")
         return
+    if after_event_id < 0:
+        await websocket.close(code=1008, reason="无效的 after_event_id")
+        return
 
     # 1.建立连接并绑定到管理器
     await manager.connect(websocket, thread_id)
     try:
+        events = await app.state.event_repository.list_after(
+            thread_id,
+            after_event_id=after_event_id,
+        )
+        for event in events:
+            await websocket.send_json(event.to_payload())
+
         # 2.保持活跃连接
         while True:
             # 3.监听接收前端消息(通常是ping)
