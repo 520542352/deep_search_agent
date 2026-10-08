@@ -129,6 +129,7 @@ deep-search-agent/
 │   └── pdf_renderer.py               # Markdown → HTML → PDF
 ├── prompt/prompts.yaml             # 主子 Agent 角色与工作流
 ├── persistence/                    # SQLite 连接、迁移与业务数据表
+├── scripts/                        # SQLite 备份、恢复、健康检查和清理工具
 ├── data/                           # 本地持久化数据库（Git 忽略）
 ├── output/                        # 会话输出（Git 忽略）
 ├── upload/                        # 临时上传（Git 忽略）
@@ -209,6 +210,12 @@ npm run dev
 
 默认访问 `http://127.0.0.1:5173`。前端当前预设后端地址为 `http://127.0.0.1:8000`。
 
+### 6. 持久化运维
+
+两份 SQLite 数据库及上传/输出文件的备份、校验、恢复演练和保留期清理方法见
+[SQLite 持久化运维指南](docs/persistence.md)。健康检查和备份不依赖任何外部服务；
+真正执行历史数据清理前必须先备份并停止 API 服务。
+
 ## 🔌 API 概览
 
 | 方法 | 路径 | 说明 |
@@ -265,6 +272,7 @@ at-least-once 语义，重放与实时推送并发时可能收到重复事件，
 - [x] 持久化 WebSocket 事件并支持断线重放和同会话多连接广播
 - [x] 提供会话历史查询、产物元数据和基于产物 ID 的安全下载接口
 - [x] 启动时对账未完成 run，并提供显式 checkpoint 恢复与安全重试
+- [x] 增加 SQLite 备份、校验、恢复演练、健康检查与保守清理工具
 - [ ] 为搜索结果增加可信度评分与引用溯源
 - [ ] 增加 Agent 调用链路、Token 成本和任务耗时指标
 

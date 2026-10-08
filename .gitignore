@@ -41,6 +41,7 @@ htmlcov/
 /test-results/
 /eval-results/
 /data/
+/backups/
 .tox/
 .nox/
 .coverage
